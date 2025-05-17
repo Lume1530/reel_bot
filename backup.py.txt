@@ -1,0 +1,572 @@
+import os
+import re
+import asyncio
+import logging
+from datetime import datetime
+from dotenv import load_dotenv
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ConversationHandler,
+    ContextTypes
+)
+
+from fastapi import FastAPI
+import uvicorn
+
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import Column, Integer, String, BigInteger, text
+
+# ─── Configuration & Logging ────────────────────────────────────────────────────
+load_dotenv()
+TOKEN        = os.getenv("TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
+ADMIN_IDS    = set(map(int, os.getenv("ADMIN_ID", "").split(",")))  # e.g. "12345,67890"
+PORT         = int(os.getenv("PORT", 8000))
+COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC", 60))
+
+if not all([TOKEN, DATABASE_URL]):
+    print("❌ TOKEN and DATABASE_URL must be set in .env")
+    exit(1)
+
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ─── FastAPI Health Check ───────────────────────────────────────────────────────
+app_fastapi = FastAPI()
+
+@app_fastapi.get("/")
+async def health():
+    return {"status": "ok"}
+
+async def start_health_check_server():
+    config = uvicorn.Config(app_fastapi, host="0.0.0.0", port=PORT, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+# ─── Database Setup ─────────────────────────────────────────────────────────────
+Base = declarative_base()
+engine = create_async_engine(DATABASE_URL, echo=False)
+AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        # ensure owner_handle column exists
+        await conn.execute(text(
+            "ALTER TABLE reels ADD COLUMN IF NOT EXISTS owner_handle VARCHAR"
+        ))
+        # allowed_accounts table
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS allowed_accounts (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                insta_handle VARCHAR NOT NULL
+            )
+        """))
+
+class Reel(Base):
+    __tablename__ = "reels"
+    id           = Column(Integer, primary_key=True)
+    user_id      = Column(BigInteger, nullable=False)
+    shortcode    = Column(String, nullable=False)
+    last_views   = Column(BigInteger, default=0)
+    owner_handle = Column(String, nullable=True)
+
+# ─── Utilities ─────────────────────────────────────────────────────────────────
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+_cooldowns: dict[int, datetime] = {}
+def can_use(user_id: int) -> bool:
+    now = datetime.utcnow()
+    last = _cooldowns.get(user_id)
+    if not last or (now - last).total_seconds() >= COOLDOWN_SEC:
+        _cooldowns[user_id] = now
+        return True
+    return False
+
+def debug_handler(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            return await func(update, context)
+        except Exception:
+            logger.exception("Handler error")
+            if update.message:
+                await update.message.reply_text(
+                    "⚠️ An unexpected error occurred. Please try again later.",
+                    parse_mode=ParseMode.HTML
+                )
+    return wrapper
+
+# ─── Selenium Login Flow ────────────────────────────────────────────────────────
+ADD_IG_USERNAME, ADD_IG_PASSWORD, ADD_IG_OTP = range(3)
+_pending_drivers: dict[int, webdriver.Chrome] = {}
+
+def _sync_instagram_login(username: str, password: str, session_dir: str):
+    opts = webdriver.ChromeOptions()
+    opts.add_argument(f"--user-data-dir={session_dir}")   # ← comment this out for now
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--start-maximized")
+
+    logger.info(f"🔑 Launching Chrome for Instagram login (user={username})")
+    driver = webdriver.Chrome(
+        service=ChromeService(ChromeDriverManager().install()),
+        options=opts
+    )
+
+    login_url = "https://www.instagram.com/accounts/login/"
+    logger.info(f"🌐 Navigating to {login_url}")
+    driver.get(login_url)
+
+    wait = WebDriverWait(driver, 15)
+    try:
+        # wait for the username field
+        wait.until(EC.presence_of_element_located((By.NAME, "username")))
+        logger.info("✅ Login page loaded successfully")
+    except TimeoutException:
+        logger.error("❌ Timeout waiting for login page")
+        driver.quit()
+        raise
+
+    # now proceed with typing credentials
+    driver.find_element(By.NAME, "username").send_keys(username)
+    driver.find_element(By.NAME, "password").send_keys(password)
+    driver.find_element(By.NAME, "password").submit()
+
+    # check if OTP is required
+    try:
+        wait.until(EC.presence_of_element_located((By.NAME, "verificationCode")))
+        logger.info("🔐 OTP prompt detected")
+        return driver, True
+    except TimeoutException:
+        logger.info("🔓 Logged in without OTP, dismissing popups")
+        for _ in range(2):
+            try:
+                btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[text()='Not Now']")))
+                btn.click()
+            except TimeoutException:
+                break
+        return driver, False
+
+
+def _sync_submit_otp(driver: webdriver.Chrome, code: str):
+    wait = WebDriverWait(driver, 15)
+    wait.until(EC.presence_of_element_located((By.NAME, "verificationCode"))).send_keys(code)
+    driver.find_element(By.NAME, "verificationCode").submit()
+    for _ in range(2):
+        try:
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[text()='Not Now']")))
+            btn.click()
+        except TimeoutException:
+            break
+    driver.quit()
+    return True
+
+async def _login_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    session_dir = os.path.join("insta_sessions", str(uid))
+    os.makedirs(session_dir, exist_ok=True)
+    username = context.user_data["ig_username"]
+    password = context.user_data["ig_password"]
+    loop = asyncio.get_running_loop()
+    driver, needs_otp = await loop.run_in_executor(
+        None, _sync_instagram_login, username, password, session_dir
+    )
+    if needs_otp:
+        _pending_drivers[uid] = driver
+    else:
+        driver.quit()
+    return needs_otp
+
+async def _submit_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    code = update.message.text.strip()
+    driver = _pending_drivers.pop(uid, None)
+    if not driver:
+        return False
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_submit_otp, driver, code)
+
+# ─── Selenium Batch Update ─────────────────────────────────────────────────────
+def sync_update_all_reels(records):
+    opts = webdriver.ChromeOptions()
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--start-maximized")
+    driver = webdriver.Chrome(
+        service=ChromeService(ChromeDriverManager().install()),
+        options=opts
+    )
+    wait = WebDriverWait(driver, 15)
+    results = []
+    for rid, sc in records:
+        url = f"https://www.instagram.com/reel/{sc}/"
+        logger.info(f"Opening {url}")
+        driver.get(url)
+        elt = wait.until(EC.presence_of_element_located((By.XPATH, "//span[contains(text(),' views')]")))
+        txt = elt.text
+        digits = "".join(c for c in txt if c.isdigit())
+        results.append((rid, int(digits) if digits else 0))
+    driver.quit()
+    return results
+
+async def update_all_reels():
+    async with AsyncSessionLocal() as session:
+        rows = await session.execute(text("SELECT id, shortcode FROM reels"))
+        records = rows.fetchall()
+    loop = asyncio.get_running_loop()
+    updates = await loop.run_in_executor(None, sync_update_all_reels, records)
+    async with AsyncSessionLocal() as session:
+        for rid, views in updates:
+            await session.execute(
+                text("UPDATE reels SET last_views = :v WHERE id = :i"),
+                {"v": views, "i": rid}
+            )
+        await session.commit()
+
+async def periodic_updater():
+    await asyncio.sleep(5)
+    while True:
+        logger.info("🔄 Periodic update starting")
+        await update_all_reels()
+        await asyncio.sleep(12 * 3600)
+
+# ─── Telegram Handlers ──────────────────────────────────────────────────────────
+@debug_handler
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lines = [
+        "👋 <b>Welcome to the Reel Tracker Bot!</b>",
+        "",
+        "<b>User Commands:</b>",
+        "• <code>/addreel &lt;link&gt;</code> – Track a new reel",
+        "• <code>/removereel &lt;shortcode&gt;</code> – Remove a tracked reel",
+        "• <code>/myreels</code> – List your tracked reels",
+        "• <code>/stats</code> – Show your personal stats",
+        "• <code>/addinstagram</code> – Log in to Instagram for scraping",
+        ""
+    ]
+    if is_admin(update.effective_user.id):
+        lines += [
+            "<b>Administrator Commands:</b>",
+            "• <code>/addaccount &lt;user_id&gt; &lt;@handle&gt;</code> – Allow an Instagram account",
+            "• <code>/removeaccount &lt;user_id&gt;</code> – Revoke an allowed account",
+            "• <code>/forceupdate</code> – Manually refresh all reels",
+            "• <code>/checkapi &lt;@handle&gt;</code> – Check follower count scraper",
+            "• <code>/leaderboard</code> – Show global leaderboard",
+            ""
+        ]
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+@debug_handler
+async def add_instagram_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔐 Please enter your Instagram username:")
+    return ADD_IG_USERNAME
+
+@debug_handler
+async def add_instagram_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["ig_username"] = update.message.text.strip()
+    await update.message.reply_text("🔑 Now enter your Instagram password:")
+    return ADD_IG_PASSWORD
+
+@debug_handler
+async def add_instagram_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Save the password from the user’s message
+    context.user_data["ig_password"] = update.message.text.strip()
+
+    # Acknowledge and proceed with login
+    await update.message.reply_text("⏳ Logging in to Instagram…")
+    needs_otp = await _login_instagram(update, context)
+    if needs_otp:
+        return await update.message.reply_text(
+            "✉️ OTP required. Please enter the code you received:", parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.message.reply_text(
+            "✅ Logged in successfully and session saved.", parse_mode=ParseMode.HTML
+        )
+        return ConversationHandler.END
+
+
+@debug_handler
+async def add_instagram_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    success = await _submit_otp(update, context)
+    if success:
+        await update.message.reply_text("✅ OTP verified. Instagram session established.", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text("❌ OTP failed. Please retry /addinstagram.", parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+@debug_handler
+async def add_instagram_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚫 Instagram login cancelled.", parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+@debug_handler
+async def addaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return await update.message.reply_text("❌ Permission denied.", parse_mode=ParseMode.HTML)
+    if len(context.args) != 2:
+        return await update.message.reply_text("❗ Usage: /addaccount <user_id> <@handle>", parse_mode=ParseMode.HTML)
+    uid = int(context.args[0])
+    handle = context.args[1].lstrip("@")
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            text("INSERT INTO allowed_accounts (user_id, insta_handle) VALUES (:u, :h)"),
+            {"u": uid, "h": handle}
+        )
+        await session.commit()
+    await update.message.reply_text(f"✅ @{handle} allowed for user {uid}.", parse_mode=ParseMode.HTML)
+
+@debug_handler
+async def removeaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return await update.message.reply_text("❌ Permission denied.", parse_mode=ParseMode.HTML)
+    if len(context.args) != 1:
+        return await update.message.reply_text("❗ Usage: /removeaccount <user_id>", parse_mode=ParseMode.HTML)
+    uid = int(context.args[0])
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            text("DELETE FROM allowed_accounts WHERE user_id = :u"),
+            {"u": uid}
+        )
+        await session.commit()
+    await update.message.reply_text(f"🗑️ Accounts revoked for user {uid}.", parse_mode=ParseMode.HTML)
+
+@debug_handler
+async def addreel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await update.message.reply_text("❗ Provide a reel link.", parse_mode=ParseMode.HTML)
+    m = re.search(r"/reel/([^/?]+)/?", context.args[0])
+    if not m:
+        return await update.message.reply_text("❌ Invalid reel link.", parse_mode=ParseMode.HTML)
+    sc = m.group(1)
+    uid = update.effective_user.id
+    async with AsyncSessionLocal() as session:
+        acct = await session.execute(text("SELECT insta_handle FROM allowed_accounts WHERE user_id=:u"), {"u": uid})
+        row = acct.fetchone()
+        if not row:
+            return await update.message.reply_text("🚫 No Instagram account linked. Use /addinstagram first.", parse_mode=ParseMode.HTML)
+        exists = await session.execute(text("SELECT 1 FROM reels WHERE shortcode=:s"), {"s": sc})
+        if exists.scalar():
+            return await update.message.reply_text("⚠️ Already tracking that reel.", parse_mode=ParseMode.HTML)
+        await session.execute(
+            text("INSERT INTO reels (user_id, shortcode, last_views, owner_handle) VALUES (:u,:s,0,:h)"),
+            {"u": uid, "s": sc, "h": row[0]}
+        )
+        await session.commit()
+    await update.message.reply_text("✅ Reel added for tracking.", parse_mode=ParseMode.HTML)
+
+@debug_handler
+async def removereel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await update.message.reply_text("❗ Provide a shortcode to remove.", parse_mode=ParseMode.HTML)
+    sc = context.args[0]
+    uid = update.effective_user.id
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("DELETE FROM reels WHERE shortcode=:s AND user_id=:u"), {"s": sc, "u": uid})
+        await session.commit()
+    await update.message.reply_text("🗑️ Reel removed.", parse_mode=ParseMode.HTML)
+
+@debug_handler
+async def myreels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(text("SELECT shortcode FROM reels WHERE user_id=:u"), {"u": uid})
+        reels = [r[0] for r in res.fetchall()]
+    if not reels:
+        return await update.message.reply_text("😔 You have no tracked reels.", parse_mode=ParseMode.HTML)
+    lines = ["🎥 <b>Your Tracked Reels:</b>"]
+    for sc in reels:
+        lines.append(f"• <a href=\"https://www.instagram.com/reel/{sc}/\">{sc}</a>")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+@debug_handler
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    async with AsyncSessionLocal() as session:
+        tot = await session.execute(text("SELECT COALESCE(SUM(last_views),0), COUNT(id) FROM reels WHERE user_id=:u"), {"u": uid})
+        total_views, total_videos = tot.fetchone()
+        top = await session.execute(text("SELECT shortcode, last_views FROM reels WHERE user_id=:u ORDER BY last_views DESC LIMIT 10"), {"u": uid})
+        top_reels = top.fetchall()
+    lines = [
+        "📊 <b>Your Statistics</b>",
+        f"• Total views: <b>{total_views}</b>",
+        f"• Total reels: <b>{total_videos}</b>",
+        "",
+        "🎥 <b>Top 10 Reels:</b>"
+    ]
+    for sc, v in top_reels:
+        lines.append(f"• <a href=\"https://www.instagram.com/reel/{sc}/\">{sc}</a> – {v} views")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+@debug_handler
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return await update.message.reply_text("❌ Permission denied.", parse_mode=ParseMode.HTML)
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(text("SELECT user_id, COUNT(id) vids, COALESCE(SUM(last_views),0) views FROM reels GROUP BY user_id ORDER BY views DESC"))
+        data = res.fetchall()
+    if not data:
+        return await update.message.reply_text("🏁 No data available.", parse_mode=ParseMode.HTML)
+    lines = ["🏆 <b>Global Leaderboard</b>"]
+    for uid, vids, views in data:
+        try:
+            chat = await context.bot.get_chat(uid)
+            name = chat.username or chat.full_name or str(uid)
+        except:
+            name = str(uid)
+        lines.append(f"• {name} – {vids} reels – {views} views")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+@debug_handler
+async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return await update.message.reply_text("❌ Permission denied.", parse_mode=ParseMode.HTML)
+    if not can_use(update.effective_user.id):
+        return await update.message.reply_text(f"⏳ Please wait {COOLDOWN_SEC}s before forcing an update.", parse_mode=ParseMode.HTML)
+    await update.message.reply_text("🔄 Starting manual update of all reels…", parse_mode=ParseMode.HTML)
+    await update_all_reels()
+    await update.message.reply_text("✅ All reels updated.", parse_mode=ParseMode.HTML)
+
+@debug_handler
+async def checkapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return await update.message.reply_text(
+            "❌ You’re not authorized to use this command.",
+            parse_mode=ParseMode.HTML
+        )
+    if not context.args:
+        return await update.message.reply_text(
+            "❗ Usage: <code>/checkapi &lt;@instahandle&gt;</code>",
+            parse_mode=ParseMode.HTML
+        )
+
+    handle = context.args[0].lstrip("@")
+
+    def _sync_get_followers(h):
+        opts = webdriver.ChromeOptions()
+        # don’t reuse the same user-data-dir here:
+        # opts.add_argument(f"--user-data-dir={session_dir}")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--start-maximized")
+
+        driver = webdriver.Chrome(
+            service=ChromeService(ChromeDriverManager().install()),
+            options=opts
+        )
+        url = f"https://www.instagram.com/{h}/"
+        logger.info(f"[checkapi] navigating to {url}")
+        driver.get(url)
+
+        wait = WebDriverWait(driver, 15)
+        try:
+            elt = wait.until(EC.presence_of_element_located(
+                (By.XPATH, "//a[contains(@href,'/followers')]/span")
+            ))
+            txt = elt.get_attribute("title") or elt.text
+            digits = "".join(c for c in txt if c.isdigit())
+            count = int(digits) if digits else 0
+            logger.info(f"[checkapi] found followers: {count}")
+        except TimeoutException:
+            logger.error("[checkapi] timeout waiting for followers count")
+            count = -1
+        finally:
+            driver.quit()
+
+        return count
+
+    loop = asyncio.get_running_loop()
+    count = await loop.run_in_executor(None, _sync_get_followers, handle)
+
+    if count >= 0:
+        await update.message.reply_text(
+            f"👤 @{handle} has <b>{count}</b> followers",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.message.reply_text(
+            "⚠️ Could not retrieve follower count. Please try again later.",
+            parse_mode=ParseMode.HTML
+        )
+
+
+    # offload to thread
+    loop = asyncio.get_running_loop()
+    count = await loop.run_in_executor(None, _sync_get_followers, handle, session_dir)
+
+    if count >= 0:
+        return await update.message.reply_text(
+            f"👤 @{handle} has <b>{count}</b> followers.",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        return await update.message.reply_text(
+            "⚠️ Could not retrieve follower count. Check logs for details.",
+            parse_mode=ParseMode.HTML
+        )
+
+
+# ─── Bot Startup ─────────────────────────────────────────────────────────────────
+async def run_bot():
+    await init_db()
+    asyncio.create_task(start_health_check_server())
+    asyncio.create_task(periodic_updater())
+
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    # Conversation handler for /addinstagram
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("addinstagram", add_instagram_start)],
+        states={
+            ADD_IG_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_instagram_username)],
+            ADD_IG_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_instagram_password)],
+            ADD_IG_OTP:      [MessageHandler(filters.TEXT & ~filters.COMMAND, add_instagram_otp)],
+        },
+        fallbacks=[CommandHandler("cancel", add_instagram_cancel)],
+        allow_reentry=True
+    )
+    app.add_handler(conv)
+
+    # Core command handlers
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("addaccount", addaccount))
+    app.add_handler(CommandHandler("removeaccount", removeaccount))
+    app.add_handler(CommandHandler("addreel", addreel))
+    app.add_handler(CommandHandler("removereel", removereel))
+    app.add_handler(CommandHandler("myreels", myreels))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("leaderboard", leaderboard))
+    app.add_handler(CommandHandler("forceupdate", forceupdate))
+    app.add_handler(CommandHandler("checkapi", checkapi))
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    asyncio.run(run_bot())
