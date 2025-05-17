@@ -462,6 +462,8 @@ async def removeaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import time
+    from datetime import datetime
     user_id = update.effective_user.id
     now = time.time()
     # Cooldown check
@@ -481,6 +483,8 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid = user_id
     results = []
+    min_date_str = await get_min_date()
+    min_date = parse_date(min_date_str) if min_date_str else None
     async with AsyncSessionLocal() as s:
         # Check if user exists, if not create it
         user = (await s.execute(text("SELECT total_views FROM users WHERE user_id = :u"), {"u": uid})).fetchone()
@@ -505,6 +509,15 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sup, code = m.group("sup"), m.group("code")
             try:
                 reel_data = await get_reel_data(code)
+                # Check min date
+                upload_date = None
+                if 'taken_at_timestamp' in reel_data:
+                    upload_date = datetime.utcfromtimestamp(reel_data['taken_at_timestamp']).date()
+                elif 'upload_date' in reel_data:
+                    upload_date = datetime.strptime(reel_data['upload_date'], "%Y-%m-%d").date()
+                if min_date and upload_date and upload_date < min_date:
+                    results.append(f"🚫 Too old: {link} (uploaded {upload_date}, min allowed {min_date})")
+                    continue
                 if reel_data['owner_username'].lower() != expected.lower():
                     results.append(f"🚫 Not your reel: {link}")
                     continue
@@ -1127,14 +1140,12 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
     """Handle approve/reject callbacks"""
     query = update.callback_query
     await query.answer()
-    
+    logger.info(f"Review callback triggered by user {query.from_user.id} with data: {query.data}")
     if not await is_admin(query.from_user.id):
         await query.edit_message_text("🚫 Unauthorized")
         return
-    
     action, request_id = query.data.split('_')
     request_id = int(request_id)
-    
     async with AsyncSessionLocal() as s:
         # Get request details
         request = (await s.execute(
@@ -1145,70 +1156,72 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
             """),
             {"id": request_id}
         )).fetchone()
-        
+        logger.info(f"Fetched request: {request}")
         if not request:
             await query.edit_message_text("❌ Request not found or already processed.")
             return
-        
         user_id, handle = request
-        
         if action == 'approve':
-            # Try to add to allowed accounts, check for duplicates
-            result = await s.execute(
-                text("""
-                    INSERT INTO allowed_accounts (user_id, insta_handle)
-                    VALUES (:u, :h)
-                    ON CONFLICT (user_id, insta_handle) DO NOTHING
-                    RETURNING id
-                """),
-                {"u": user_id, "h": handle}
-            )
-            row = result.fetchone()
-            if not row:
+            try:
+                result = await s.execute(
+                    text("""
+                        INSERT INTO allowed_accounts (user_id, insta_handle)
+                        VALUES (:u, :h)
+                        ON CONFLICT (user_id, insta_handle) DO NOTHING
+                        RETURNING id
+                    """),
+                    {"u": user_id, "h": handle}
+                )
+                row = result.fetchone()
+                logger.info(f"Insert result: {row}")
+                if not row:
+                    await query.edit_message_text(
+                        f"⚠️ This account is already linked for the user. No action taken.",
+                        reply_markup=None
+                    )
+                    return
+                await s.execute(
+                    text("UPDATE account_requests SET status = 'approved' WHERE id = :id"),
+                    {"id": request_id}
+                )
+                await s.commit()
+                try:
+                    await context.bot.send_message(
+                        user_id,
+                        f"✅ Your request to link @{handle} has been approved!\n"
+                        f"You can now use /submit to submit your reels."
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to notify user {user_id}: {e}")
                 await query.edit_message_text(
-                    f"⚠️ This account is already linked for the user. No action taken.",
+                    f"✅ Approved request for @{handle}",
                     reply_markup=None
                 )
-                return
-            # Update request status
-            await s.execute(
-                text("UPDATE account_requests SET status = 'approved' WHERE id = :id"),
-                {"id": request_id}
-            )
-            await s.commit()
-            # Notify user
-            try:
-                await context.bot.send_message(
-                    user_id,
-                    f"✅ Your request to link @{handle} has been approved!\n"
-                    f"You can now use /submit to submit your reels."
-                )
             except Exception as e:
-                logger.error(f"Failed to notify user {user_id}: {e}")
-            await query.edit_message_text(
-                f"✅ Approved request for @{handle}",
-                reply_markup=None
-            )
+                logger.error(f"Approval error: {e}")
+                await query.edit_message_text(f"❌ Error during approval: {e}")
         else:  # reject
-            # Update request status
-            await s.execute(
-                text("UPDATE account_requests SET status = 'rejected' WHERE id = :id"),
-                {"id": request_id}
-            )
-            await s.commit()
-            # Notify user
             try:
-                await context.bot.send_message(
-                    user_id,
-                    f"❌ Your request to link @{handle} has been rejected.\n"
-                    f"Please contact an admin for more information."
+                await s.execute(
+                    text("UPDATE account_requests SET status = 'rejected' WHERE id = :id"),
+                    {"id": request_id}
+                )
+                await s.commit()
+                try:
+                    await context.bot.send_message(
+                        user_id,
+                        f"❌ Your request to link @{handle} has been rejected.\n"
+                        f"Please contact an admin for more information."
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to notify user {user_id}: {e}")
+                await query.edit_message_text(
+                    f"❌ Rejected request for @{handle}",
+                    reply_markup=None
                 )
             except Exception as e:
-                logger.error(f"Failed to notify user {user_id}: {e}")
-            await query.edit_message_text(
-                f"❌ Rejected request for @{handle}",
-                reply_markup=None
-            )
+                logger.error(f"Rejection error: {e}")
+                await query.edit_message_text(f"❌ Error during rejection: {e}")
 
 @debug_handler
 async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1735,8 +1748,79 @@ async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption="🏆 Private Campaign Leaderboard"
         )
 
+# Add config table for minimum date
+async def ensure_config_table():
+    async with engine.begin() as conn:
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS config (
+                key VARCHAR PRIMARY KEY,
+                value VARCHAR
+            )
+        """))
+
+# Helper to get/set min date
+def parse_date(date_str):
+    from datetime import datetime
+    return datetime.strptime(date_str, "%Y-%m-%d").date()
+
+async def set_min_date(date_str):
+    async with AsyncSessionLocal() as s:
+        await s.execute(text("""
+            INSERT INTO config (key, value) VALUES ('min_date', :v)
+            ON CONFLICT (key) DO UPDATE SET value = :v
+        """), {"v": date_str})
+        await s.commit()
+
+async def get_min_date():
+    async with AsyncSessionLocal() as s:
+        row = (await s.execute(text("SELECT value FROM config WHERE key = 'min_date'"))).fetchone()
+        if row:
+            return row[0]
+        return None
+
+@debug_handler
+async def setmindate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    if not context.args:
+        return await update.message.reply_text("Usage: /setmindate YYYY-MM-DD")
+    date_str = context.args[0]
+    try:
+        parse_date(date_str)
+    except Exception:
+        return await update.message.reply_text("❌ Invalid date format. Use YYYY-MM-DD.")
+    await set_min_date(date_str)
+    await update.message.reply_text(f"✅ Minimum allowed video date set to {date_str}")
+
+@debug_handler
+async def getmindate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    min_date = await get_min_date()
+    if min_date:
+        await update.message.reply_text(f"Current minimum allowed video date: {min_date}")
+    else:
+        await update.message.reply_text("No minimum date set.")
+
+# Ensure allowed_accounts has a unique constraint on (user_id, insta_handle)
+async def ensure_allowed_accounts_unique():
+    async with engine.begin() as conn:
+        await conn.execute(text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints
+                    WHERE table_name = 'allowed_accounts' AND constraint_type = 'UNIQUE' AND constraint_name = 'allowed_accounts_user_id_insta_handle_key'
+                ) THEN
+                    ALTER TABLE allowed_accounts ADD CONSTRAINT allowed_accounts_user_id_insta_handle_key UNIQUE (user_id, insta_handle);
+                END IF;
+            END$$;
+        """))
+
 async def run_bot():
     await init_db()
+    await ensure_config_table()
+    await ensure_allowed_accounts_unique()
     asyncio.create_task(start_health_check_server())
     asyncio.create_task(start_daily_updates())
     
@@ -1752,7 +1836,7 @@ async def run_bot():
         ("addpaypal", add_paypal), ("addupi", add_upi), ("review", review),
         ("forceupdate", forceupdate), ("addadmin", addadmin), ("removeadmin", removeadmin),
         ("clearbad", clearbad), ("addslot", addslot), ("removeslot", removeslot),
-        ("slotstats", slotstats), ("lbpng", lbpng),
+        ("slotstats", slotstats), ("lbpng", lbpng), ("setmindate", setmindate), ("getmindate", getmindate),
     ]
     for cmd, h in handlers:
         app.add_handler(CommandHandler(cmd, h))
