@@ -1818,10 +1818,50 @@ async def ensure_allowed_accounts_unique():
             END$$;
         """))
 
+# Ensure allowed_accounts has id SERIAL PRIMARY KEY and correct unique constraints
+async def migrate_allowed_accounts():
+    async with engine.begin() as conn:
+        # Drop PK on user_id if exists
+        await conn.execute(text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints
+                    WHERE table_name = 'allowed_accounts' AND constraint_type = 'PRIMARY KEY' AND constraint_name = 'allowed_accounts_pkey'
+                ) THEN
+                    ALTER TABLE allowed_accounts DROP CONSTRAINT allowed_accounts_pkey;
+                END IF;
+            END$$;
+        """))
+        # Add id SERIAL PRIMARY KEY if not exists
+        await conn.execute(text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'allowed_accounts' AND column_name = 'id'
+                ) THEN
+                    ALTER TABLE allowed_accounts ADD COLUMN id SERIAL PRIMARY KEY;
+                END IF;
+            END$$;
+        """))
+        # Add unique constraint on (user_id, insta_handle) if not exists
+        await conn.execute(text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints
+                    WHERE table_name = 'allowed_accounts' AND constraint_type = 'UNIQUE' AND constraint_name = 'allowed_accounts_user_id_insta_handle_key'
+                ) THEN
+                    ALTER TABLE allowed_accounts ADD CONSTRAINT allowed_accounts_user_id_insta_handle_key UNIQUE (user_id, insta_handle);
+                END IF;
+            END$$;
+        """))
+
 async def run_bot():
     await init_db()
     await ensure_config_table()
-    await ensure_allowed_accounts_unique()
+    await migrate_allowed_accounts()
     asyncio.create_task(start_health_check_server())
     asyncio.create_task(start_daily_updates())
     
