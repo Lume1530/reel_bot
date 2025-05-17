@@ -1163,23 +1163,24 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
         user_id, handle = request
         if action == 'approve':
             try:
-                result = await s.execute(
-                    text("""
-                        INSERT INTO allowed_accounts (user_id, insta_handle)
-                        VALUES (:u, :h)
-                        ON CONFLICT (user_id, insta_handle) DO NOTHING
-                        RETURNING id
-                    """),
+                # Check for duplicate before insert
+                exists = await s.execute(
+                    text("SELECT 1 FROM allowed_accounts WHERE user_id = :u AND insta_handle = :h"),
                     {"u": user_id, "h": handle}
                 )
-                row = result.fetchone()
-                logger.info(f"Insert result: {row}")
-                if not row:
+                if exists.scalar():
                     await query.edit_message_text(
                         f"⚠️ This account is already linked for the user. No action taken.",
                         reply_markup=None
                     )
                     return
+                await s.execute(
+                    text("""
+                        INSERT INTO allowed_accounts (user_id, insta_handle)
+                        VALUES (:u, :h)
+                    """),
+                    {"u": user_id, "h": handle}
+                )
                 await s.execute(
                     text("UPDATE account_requests SET status = 'approved' WHERE id = :id"),
                     {"id": request_id}
