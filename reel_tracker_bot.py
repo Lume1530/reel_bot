@@ -6,6 +6,7 @@ import requests
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
 import io
+import time
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -308,7 +309,9 @@ async def start_daily_updates():
             logger.error(f"Error in daily update task: {str(e)}")
             await asyncio.sleep(3600)  # Wait an hour before retrying
 
-# ─── Telegram Handlers ─────────────────────────────────────────────────────────
+# Global dict for submit cooldowns
+submit_cooldowns = {}
+
 @debug_handler
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmds = [
@@ -459,15 +462,25 @@ async def removeaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    now = time.time()
+    # Cooldown check
+    last_time = submit_cooldowns.get(user_id, 0)
+    if now - last_time < 30:
+        wait = int(30 - (now - last_time))
+        return await update.message.reply_text(f"⏳ Please wait {wait} seconds before submitting again.")
+    submit_cooldowns[user_id] = now
+
     if not context.args:
-        return await update.message.reply_text("❗ Provide a reel link.")
-    raw = context.args[0]
-    m = re.search(r"^(?:https?://)?(?:www\.|m\.)?instagram\.com/(?:(?P<sup>[^/]+)/)?reel/(?P<code>[^/?#&]+)", raw)
-    if not m:
-        return await update.message.reply_text("❌ Invalid reel URL.")
-    sup, code = m.group("sup"), m.group("code")
-    uid = update.effective_user.id
-    
+        return await update.message.reply_text("❗ Provide up to 5 reel links, separated by commas.")
+    # Join all args and split by comma
+    raw = " ".join(context.args)
+    links = [l.strip() for l in raw.split(",") if l.strip()]
+    if not links or len(links) > 5:
+        return await update.message.reply_text("❗ You can submit up to 5 links at once, separated by commas.")
+
+    uid = user_id
+    results = []
     async with AsyncSessionLocal() as s:
         # Check if user exists, if not create it
         user = (await s.execute(text("SELECT total_views FROM users WHERE user_id = :u"), {"u": uid})).fetchone()
@@ -480,66 +493,54 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current_views = 0
         else:
             current_views = user[0] or 0
-        
         acc = (await s.execute(text("SELECT insta_handle FROM allowed_accounts WHERE user_id=:u"), {"u": uid})).fetchone()
         if not acc:
             return await update.message.reply_text("🚫 No IG linked—ask admin to /addaccount.")
         expected = acc[0]
-        
-        try:
-            reel_data = await get_reel_data(code)
-            if reel_data['owner_username'].lower() != expected.lower():
-                return await update.message.reply_text(f"🚫 That reel belongs to @{reel_data['owner_username']}.")
-                
-            # Update total views in users table
-            new_views = current_views + reel_data['view_count']
-            logger.info(f"Updating views for user {uid}: {current_views} + {reel_data['view_count']} = {new_views}")
-            
-            await s.execute(
-                text("UPDATE users SET total_views = :v WHERE user_id = :u"),
-                {"v": new_views, "u": uid}
-            )
-            
-            # Check if this handle belongs to a slot
-            slot = await s.execute(text("""
-                SELECT slot_number FROM slot_accounts 
-                WHERE LOWER(insta_handle) = LOWER(:h)
-            """), {"h": expected})
-            slot_result = slot.fetchone()
-            
-            if slot_result:
-                slot_number = slot_result[0]
-                # Add to slot submissions
-                await s.execute(text("""
-                    INSERT INTO slot_submissions (slot_number, shortcode, insta_handle, view_count)
-                    VALUES (:s, :c, :h, :v)
-                """), {
-                    "s": slot_number,
-                    "c": code,
-                    "h": expected,
-                    "v": reel_data['view_count']
-                })
-                logger.info(f"Added submission to slot {slot_number} for @{expected}")
-                
-                # Verify the insertion
-                verify = await s.execute(text("""
-                    SELECT COUNT(*) FROM slot_submissions 
-                    WHERE slot_number = :s AND shortcode = :c
-                """), {"s": slot_number, "c": code})
-                logger.info(f"Verification: {verify.scalar()} submissions found for this reel")
-            
-        except Exception as e:
-            logger.error(f"Error in submit: {str(e)}")
-            return await update.message.reply_text(f"❌ {str(e)}")
-            
-        dup = (await s.execute(text("SELECT 1 FROM reels WHERE shortcode=:c"), {"c": code})).scalar()
-        if dup:
-            return await update.message.reply_text("⚠️ Already added.")
-            
-        await s.execute(text("INSERT INTO reels(user_id,shortcode) VALUES(:u,:c)"), {"u": uid, "c": code})
+        for link in links:
+            m = re.search(r"^(?:https?://)?(?:www\.|m\.)?instagram\.com/(?:(?P<sup>[^/]+)/)?reel/(?P<code>[^/?#&]+)", link)
+            if not m:
+                results.append(f"❌ Invalid: {link}")
+                continue
+            sup, code = m.group("sup"), m.group("code")
+            try:
+                reel_data = await get_reel_data(code)
+                if reel_data['owner_username'].lower() != expected.lower():
+                    results.append(f"🚫 Not your reel: {link}")
+                    continue
+                # Update total views in users table
+                new_views = current_views + reel_data['view_count']
+                await s.execute(
+                    text("UPDATE users SET total_views = :v WHERE user_id = :u"),
+                    {"v": new_views, "u": uid}
+                )
+                # Check if this handle belongs to a slot
+                slot = await s.execute(text("""
+                    SELECT slot_number FROM slot_accounts 
+                    WHERE LOWER(insta_handle) = LOWER(:h)
+                """), {"h": expected})
+                slot_result = slot.fetchone()
+                if slot_result:
+                    slot_number = slot_result[0]
+                    await s.execute(text("""
+                        INSERT INTO slot_submissions (slot_number, shortcode, insta_handle, view_count)
+                        VALUES (:s, :c, :h, :v)
+                    """), {
+                        "s": slot_number,
+                        "c": code,
+                        "h": expected,
+                        "v": reel_data['view_count']
+                    })
+                dup = (await s.execute(text("SELECT 1 FROM reels WHERE shortcode=:c"), {"c": code})).scalar()
+                if dup:
+                    results.append(f"⚠️ Already added: {link}")
+                    continue
+                await s.execute(text("INSERT INTO reels(user_id,shortcode) VALUES(:u,:c)"), {"u": uid, "c": code})
+                results.append(f"✅ Added: {link}")
+            except Exception as e:
+                results.append(f"❌ Error: {link} ({str(e)})")
         await s.commit()
-        
-    await update.message.reply_text("✅ Reel added!")
+    await update.message.reply_text("\n".join(results))
 
 @debug_handler
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
