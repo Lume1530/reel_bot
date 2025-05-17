@@ -552,8 +552,19 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     async with AsyncSessionLocal() as s:
         await s.execute(text("DELETE FROM reels WHERE shortcode=:c AND user_id=:u"), {"c": code, "u": uid})
+        # Recalculate total_views for this user
+        reels = await s.execute(text("SELECT shortcode FROM reels WHERE user_id = :u"), {"u": uid})
+        codes = [r[0] for r in reels.fetchall()]
+        total_views = 0
+        for sc in codes:
+            try:
+                reel_data = await get_reel_data(sc)
+                total_views += reel_data['view_count']
+            except Exception:
+                pass
+        await s.execute(text("UPDATE users SET total_views = :v WHERE user_id = :u"), {"v": total_views, "u": uid})
         await s.commit()
-    await update.message.reply_text("🗑️ Reel removed.")
+    await update.message.reply_text("🗑️ Reel removed and stats updated.")
 
 @debug_handler
 async def cleardata(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -561,8 +572,9 @@ async def cleardata(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("🚫 Unauthorized")
     async with AsyncSessionLocal() as s:
         await s.execute(text("DELETE FROM reels"))
+        await s.execute(text("UPDATE users SET total_views = 0"))
         await s.commit()
-    await update.message.reply_text("✅ All reels cleared.")
+    await update.message.reply_text("✅ All reels and view counts cleared.")
 
 @debug_handler
 async def addviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1141,23 +1153,29 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
         user_id, handle = request
         
         if action == 'approve':
-            # Add to allowed accounts
-            await s.execute(
+            # Try to add to allowed accounts, check for duplicates
+            result = await s.execute(
                 text("""
                     INSERT INTO allowed_accounts (user_id, insta_handle)
                     VALUES (:u, :h)
+                    ON CONFLICT (user_id, insta_handle) DO NOTHING
+                    RETURNING id
                 """),
                 {"u": user_id, "h": handle}
             )
-            
+            row = result.fetchone()
+            if not row:
+                await query.edit_message_text(
+                    f"⚠️ This account is already linked for the user. No action taken.",
+                    reply_markup=None
+                )
+                return
             # Update request status
             await s.execute(
                 text("UPDATE account_requests SET status = 'approved' WHERE id = :id"),
                 {"id": request_id}
             )
-            
             await s.commit()
-            
             # Notify user
             try:
                 await context.bot.send_message(
@@ -1167,12 +1185,10 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
                 )
             except Exception as e:
                 logger.error(f"Failed to notify user {user_id}: {e}")
-            
             await query.edit_message_text(
                 f"✅ Approved request for @{handle}",
                 reply_markup=None
             )
-            
         else:  # reject
             # Update request status
             await s.execute(
@@ -1180,7 +1196,6 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
                 {"id": request_id}
             )
             await s.commit()
-            
             # Notify user
             try:
                 await context.bot.send_message(
@@ -1190,7 +1205,6 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
                 )
             except Exception as e:
                 logger.error(f"Failed to notify user {user_id}: {e}")
-            
             await query.edit_message_text(
                 f"❌ Rejected request for @{handle}",
                 reply_markup=None
@@ -1302,10 +1316,9 @@ async def removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def clearbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove submissions with less than 10k views after 7 days"""
+    """Remove submissions with less than 10k views after 7 days and update user total views."""
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
-    
     async with AsyncSessionLocal() as s:
         # Get submissions older than 7 days
         old_submissions = await s.execute(text("""
@@ -1314,8 +1327,8 @@ async def clearbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
             JOIN users u ON r.user_id = u.user_id
             WHERE r.created_at < NOW() - INTERVAL '7 days'
         """))
-        
         removed_count = 0
+        affected_users = set()
         for shortcode, user_id, views in old_submissions:
             if views < 10000:
                 # Remove the submission
@@ -1324,7 +1337,7 @@ async def clearbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {"s": shortcode, "u": user_id}
                 )
                 removed_count += 1
-                
+                affected_users.add(user_id)
                 # Notify user
                 try:
                     await context.bot.send_message(
@@ -1334,9 +1347,21 @@ async def clearbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception as e:
                     logger.error(f"Failed to notify user {user_id}: {e}")
-        
+        # Recalculate total_views for affected users
+        for user_id in affected_users:
+            # Sum views for all remaining reels for this user
+            reels = await s.execute(text("SELECT shortcode FROM reels WHERE user_id = :u"), {"u": user_id})
+            codes = [r[0] for r in reels.fetchall()]
+            total_views = 0
+            for code in codes:
+                try:
+                    reel_data = await get_reel_data(code)
+                    total_views += reel_data['view_count']
+                except Exception:
+                    pass
+            await s.execute(text("UPDATE users SET total_views = :v WHERE user_id = :u"), {"v": total_views, "u": user_id})
         await s.commit()
-        await update.message.reply_text(f"✅ Removed {removed_count} submissions with low views")
+        await update.message.reply_text(f"✅ Removed {removed_count} submissions with low views and updated user view counts.")
 
 @debug_handler
 async def addslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
