@@ -342,6 +342,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/export</code> - Export stats.txt for all users",
             "• <code>/forceupdate</code> - Force update all reel views",
             "• <code>/clearbad</code> - Remove submissions with less than 10k views after 7 days",
+            "• <code>/setmindate &lt;YYYY-MM-DD&gt;</code> - Set minimum allowed video upload date",
+            "• <code>/getmindate</code> - Show current minimum allowed video date",
             "",
             "🎯 <b>Slot Management:</b>",
             "• <code>/addslot &lt;1|2&gt; &lt;handle1&gt; &lt;handle2&gt; ...</code> - Add handles to slot",
@@ -774,11 +776,15 @@ async def creatorstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get total videos count
         total_videos = len(links)
         
-        # Get Instagram handle
-        insta_handle = (await s.execute(
+        # Get all Instagram handles
+        handles = [r[0] for r in (await s.execute(
             text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :u"),
             {"u": uid}
-        )).scalar()
+        )).fetchall()]
+        if handles:
+            handles_str = ", ".join(f"@{h}" for h in handles)
+        else:
+            handles_str = "—"
         
         # Get payment details
         payment_details = (await s.execute(
@@ -791,7 +797,7 @@ async def creatorstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Format the message
         msg = [
             "👤 <b>Creator Statistics</b>",
-            f"• Instagram: @{insta_handle or '—'}",
+            f"• Instagram: {handles_str}",
             f"• Total Videos: <b>{total_videos}</b>",
             f"• Total Views: <b>{int(total_views):,}</b>",
             f"• Payable Amount: <b>${payable_amount:,.2f}</b>",
