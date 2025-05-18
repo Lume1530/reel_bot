@@ -2075,12 +2075,15 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if existing.scalar():
                 return await update.message.reply_text("❌ This user already has a referrer")
             
-            # Check if referrer has a commission rate set
+            # Get global commission rate
             commission = await s.execute(
-                text("SELECT rate FROM commission_rates WHERE referrer_id = :u"),
-                {"u": referrer_id}
+                text("""
+                    SELECT value
+                    FROM config
+                    WHERE key = 'referral_commission_rate'
+                """)
             )
-            commission_rate = commission.scalar()
+            commission_rate = float(commission.scalar() or 0)
             
             # Create referral relationship
             await s.execute(
@@ -2106,13 +2109,9 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = [
                 f"✅ Referral relationship created:",
                 f"• Referred User: @{referred_name}",
-                f"• Referrer: @{referrer_name}"
+                f"• Referrer: @{referrer_name}",
+                f"• Global Commission Rate: {commission_rate:.2f}%"
             ]
-            
-            if commission_rate is not None:
-                msg.append(f"• Commission Rate: {commission_rate:.2f}%")
-            else:
-                msg.append("⚠️ No commission rate set for referrer")
             
             await update.message.reply_text("\n".join(msg))
             
