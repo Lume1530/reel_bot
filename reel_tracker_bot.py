@@ -375,7 +375,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "",
             "👥 <b>Referral Management:</b>",
             "• <code>/referral &lt;user_id&gt; &lt;referrer_id&gt;</code> - Assign referral relationship",
-            "• <code>/referralstats &lt;user_id&gt;</code> - View referral statistics",
+            "• <code>/referralstats</code> - View referral statistics for all users",
             "• <code>/setcommission &lt;rate&gt;</code> - Set global commission rate",
             "• <code>/getcommission</code> - View current commission rate",
         ]
@@ -2121,104 +2121,122 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def referralstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View referral statistics for a user"""
+    """View referral statistics for all users"""
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
     
-    if len(context.args) != 1:
-        return await update.message.reply_text(
-            "Usage: /referralstats <user_id>\n"
-            "Example: /referralstats 123456789"
+    async with AsyncSessionLocal() as s:
+        # Get all users with their referral data
+        users = await s.execute(
+            text("""
+                SELECT DISTINCT u.user_id, u.username, u.total_views
+                FROM users u
+                LEFT JOIN referrals r1 ON u.user_id = r1.user_id
+                LEFT JOIN referrals r2 ON u.user_id = r2.referrer_id
+                WHERE r1.user_id IS NOT NULL OR r2.referrer_id IS NOT NULL
+                ORDER BY u.total_views DESC
+            """)
         )
-    
-    try:
-        user_id = int(context.args[0])
+        users_data = users.fetchall()
         
-        async with AsyncSessionLocal() as s:
-            # Get user's referrer
-            referrer = await s.execute(
-                text("""
-                    SELECT r.referrer_id, u.username
-                    FROM referrals r
-                    JOIN users u ON r.referrer_id = u.user_id
-                    WHERE r.user_id = :u
-                """),
-                {"u": user_id}
-            )
-            referrer_data = referrer.fetchone()
-            
-            # Get users referred by this user
-            referred = await s.execute(
-                text("""
-                    SELECT r.user_id, u.username, u.total_views
-                    FROM referrals r
-                    JOIN users u ON r.user_id = u.user_id
-                    WHERE r.referrer_id = :u
-                """),
-                {"u": user_id}
-            )
-            referred_users = referred.fetchall()
-            
-            # Get global commission rate
-            commission = await s.execute(
-                text("""
-                    SELECT value
-                    FROM config
-                    WHERE key = 'referral_commission_rate'
-                """)
-            )
-            commission_rate = float(commission.scalar() or 0)
-            
-            # Get user info
+        if not users_data:
+            return await update.message.reply_text("No referral data available.")
+        
+        # Get global commission rate
+        commission = await s.execute(
+            text("""
+                SELECT value
+                FROM config
+                WHERE key = 'referral_commission_rate'
+            """)
+        )
+        commission_rate = float(commission.scalar() or 0)
+        
+        # Process each user
+        for user_id, username, total_views in users_data:
             try:
-                chat = await context.bot.get_chat(user_id)
-                user_name = chat.username or str(user_id)
-            except:
-                user_name = str(user_id)
-            
-            # Build message
-            msg = [f"📊 <b>Referral Stats for @{user_name}</b>"]
-            
-            # Add commission rate
-            msg.append(f"\n💰 <b>Commission Rate:</b> {commission_rate:.2f}%")
-            
-            # Add referrer info
-            if referrer_data:
-                referrer_id, referrer_username = referrer_data
-                try:
-                    referrer_chat = await context.bot.get_chat(referrer_id)
-                    referrer_name = referrer_chat.username or str(referrer_id)
-                except:
-                    referrer_name = str(referrer_id)
-                msg.append(f"\n👤 <b>Referred by:</b> @{referrer_name}")
-            else:
-                msg.append("\n👤 <b>Referred by:</b> No referrer")
-            
-            # Add referred users info
-            if referred_users:
-                msg.append("\n👥 <b>Referred Users:</b>")
-                total_views = 0
-                for ref_id, ref_username, views in referred_users:
-                    try:
-                        ref_chat = await context.bot.get_chat(ref_id)
-                        ref_name = ref_chat.username or str(ref_id)
-                    except:
-                        ref_name = str(ref_id)
-                    views = views or 0
-                    total_views += views
-                    msg.append(f"• @{ref_name}: {views:,} views")
-                msg.append(f"\n📈 <b>Total Views from Referrals:</b> {total_views:,}")
+                # Get user's referrer
+                referrer = await s.execute(
+                    text("""
+                        SELECT r.referrer_id, u.username
+                        FROM referrals r
+                        JOIN users u ON r.referrer_id = u.user_id
+                        WHERE r.user_id = :u
+                    """),
+                    {"u": user_id}
+                )
+                referrer_data = referrer.fetchone()
                 
-                # Calculate potential commission
-                commission_amount = (total_views / 1000) * 0.025 * (commission_rate / 100)
-                msg.append(f"💰 <b>Potential Commission:</b> ${commission_amount:,.2f}")
-            else:
-                msg.append("\n👥 <b>Referred Users:</b> None")
-            
-            await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
-            
-    except ValueError:
-        await update.message.reply_text("❌ Invalid user ID")
+                # Get users referred by this user
+                referred = await s.execute(
+                    text("""
+                        SELECT r.user_id, u.username, u.total_views
+                        FROM referrals r
+                        JOIN users u ON r.user_id = u.user_id
+                        WHERE r.referrer_id = :u
+                    """),
+                    {"u": user_id}
+                )
+                referred_users = referred.fetchall()
+                
+                # Get user info
+                try:
+                    chat = await context.bot.get_chat(user_id)
+                    user_name = chat.username or str(user_id)
+                except:
+                    user_name = str(user_id)
+                
+                # Build message
+                msg = [f"📊 <b>Referral Stats for @{user_name}</b>"]
+                
+                # Add commission rate
+                msg.append(f"\n💰 <b>Commission Rate:</b> {commission_rate:.2f}%")
+                
+                # Add referrer info
+                if referrer_data:
+                    referrer_id, referrer_username = referrer_data
+                    try:
+                        referrer_chat = await context.bot.get_chat(referrer_id)
+                        referrer_name = referrer_chat.username or str(referrer_id)
+                    except:
+                        referrer_name = str(referrer_id)
+                    msg.append(f"\n👤 <b>Referred by:</b> @{referrer_name}")
+                else:
+                    msg.append("\n👤 <b>Referred by:</b> No referrer")
+                
+                # Add referred users info
+                if referred_users:
+                    msg.append("\n👥 <b>Referred Users:</b>")
+                    total_referral_views = 0
+                    for ref_id, ref_username, views in referred_users:
+                        try:
+                            ref_chat = await context.bot.get_chat(ref_id)
+                            ref_name = ref_chat.username or str(ref_id)
+                        except:
+                            ref_name = str(ref_id)
+                        views = views or 0
+                        total_referral_views += views
+                        msg.append(f"• @{ref_name}: {views:,} views")
+                    msg.append(f"\n📈 <b>Total Views from Referrals:</b> {total_referral_views:,}")
+                    
+                    # Calculate potential commission
+                    commission_amount = (total_referral_views / 1000) * 0.025 * (commission_rate / 100)
+                    msg.append(f"💰 <b>Potential Commission:</b> ${commission_amount:,.2f}")
+                else:
+                    msg.append("\n👥 <b>Referred Users:</b> None")
+                
+                msg.append("\n━━━━━━━━━━━━━━━━━━━━")
+                
+                await context.bot.send_message(
+                    update.effective_chat.id,
+                    "\n".join(msg),
+                    parse_mode=ParseMode.HTML
+                )
+                await asyncio.sleep(0.5)  # Small delay between messages
+                
+            except Exception as e:
+                logger.error(f"Error processing user {user_id}: {e}")
+                continue
 
 @debug_handler
 async def setcommission(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2269,7 +2287,7 @@ async def getcommission(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get global commission rate
         rate = await s.execute(
             text("""
-                SELECT value, updated_at
+                SELECT value
                 FROM config
                 WHERE key = 'referral_commission_rate'
             """)
@@ -2277,11 +2295,10 @@ async def getcommission(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rate_data = rate.fetchone()
         
         if rate_data:
-            rate_value, updated_at = rate_data
+            rate_value = rate_data[0]
             await update.message.reply_text(
                 f"📊 Global Commission Rate:\n"
-                f"• Rate: {float(rate_value):.2f}%\n"
-                f"• Last updated: {updated_at.strftime('%Y-%m-%d %H:%M:%S')}"
+                f"• Rate: {float(rate_value):.2f}%"
             )
         else:
             await update.message.reply_text("ℹ️ No commission rate set")
