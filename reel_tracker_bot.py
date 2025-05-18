@@ -782,7 +782,7 @@ async def creatorstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {"u": uid}
         )).fetchall()]
         if handles:
-            handles_str = ", ".join(f"@{h}" for h in handles)
+            handles_str = ", ".join(f"<code>@{h}</code>" for h in handles)
         else:
             handles_str = "—"
         
