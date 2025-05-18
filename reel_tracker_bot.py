@@ -160,8 +160,8 @@ def debug_handler(fn):
             text = update.message.text or ""
             try:
                 await context.bot.send_message(LOG_GROUP_ID, f"{name} {handle}: {text}")
-            except Exception:
-                logger.warning("Failed to send log message")
+            except Exception as e:
+                logger.error(f"Failed to send log message: {e}")
         try:
             return await fn(update, context)
         except Exception as e:
@@ -499,10 +499,12 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current_views = 0
         else:
             current_views = user[0] or 0
-        acc = (await s.execute(text("SELECT insta_handle FROM allowed_accounts WHERE user_id=:u"), {"u": uid})).fetchone()
-        if not acc:
+        # Fetch all linked Instagram handles for the user
+        accounts = [r[0].lower() for r in (await s.execute(
+            text("SELECT insta_handle FROM allowed_accounts WHERE user_id=:u"), {"u": uid}
+        )).fetchall()]
+        if not accounts:
             return await update.message.reply_text("🚫 No IG linked—ask admin to /addaccount.")
-        expected = acc[0]
         for link in links:
             m = re.search(r"^(?:https?://)?(?:www\.|m\.)?instagram\.com/(?:(?P<sup>[^/]+)/)?reel/(?P<code>[^/?#&]+)", link)
             if not m:
@@ -520,7 +522,8 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if min_date and upload_date and upload_date < min_date:
                     results.append(f"🚫 Too old: {link} (uploaded {upload_date}, min allowed {min_date})")
                     continue
-                if reel_data['owner_username'].lower() != expected.lower():
+                # Check if the reel owner matches any linked account
+                if reel_data['owner_username'].lower() not in accounts:
                     results.append(f"🚫 Not your reel: {link}")
                     continue
                 # Update total views in users table
@@ -533,7 +536,7 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 slot = await s.execute(text("""
                     SELECT slot_number FROM slot_accounts 
                     WHERE LOWER(insta_handle) = LOWER(:h)
-                """), {"h": expected})
+                """), {"h": reel_data['owner_username']})
                 slot_result = slot.fetchone()
                 if slot_result:
                     slot_number = slot_result[0]
@@ -543,7 +546,7 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     """), {
                         "s": slot_number,
                         "c": code,
-                        "h": expected,
+                        "h": reel_data['owner_username'],
                         "v": reel_data['view_count']
                     })
                 dup = (await s.execute(text("SELECT 1 FROM reels WHERE shortcode=:c"), {"c": code})).scalar()
