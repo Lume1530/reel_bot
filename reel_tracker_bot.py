@@ -120,6 +120,25 @@ async def init_db():
             ALTER TABLE reels ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         """))
         
+        # Add referral table
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS referrals (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL UNIQUE,
+                referrer_id BIGINT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id),
+                FOREIGN KEY (referrer_id) REFERENCES users(user_id)
+            )
+        """))
+        
+        # Add global commission rate to config table
+        await conn.execute(text("""
+            INSERT INTO config (key, value) 
+            VALUES ('referral_commission_rate', '0.00')
+            ON CONFLICT (key) DO NOTHING
+        """))
+        
         # Add initial admins from .env
         for admin_id in ADMIN_IDS:
             await conn.execute(text("""
@@ -335,6 +354,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👑 <b>Admin Commands:</b>",
             "• <code>/review &lt;user_id&gt;</code> - Review account link requests",
             "• <code>/removeaccount &lt;user_id&gt;</code> - Unlink an IG account",
+            "• <code>/removeallaccs &lt;user_id&gt;</code> - Remove all accounts for a user",
+            "• <code>/removeacc &lt;user_id&gt; &lt;@handle&gt;</code> - Remove specific account",
             "• <code>/allstats</code> - Lists stats for all creators with payment info",
             "• <code>/currentstats</code> - Show total views and working accounts",
             "• <code>/broadcast &lt;message&gt;</code> - Send message to all users",
@@ -351,6 +372,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/slotstats</code> - Show current handles and submissions in slots",
             "• <code>/addadmin &lt;user_id&gt;</code> - Add new admin",
             "• <code>/removeadmin &lt;user_id&gt;</code> - Remove admin",
+            "",
+            "👥 <b>Referral Management:</b>",
+            "• <code>/referral &lt;user_id&gt; &lt;referrer_id&gt;</code> - Assign referral relationship",
+            "• <code>/referralstats &lt;user_id&gt;</code> - View referral statistics",
+            "• <code>/setcommission &lt;rate&gt;</code> - Set global commission rate",
+            "• <code>/getcommission</code> - View current commission rate",
         ]
     await update.message.reply_text("\n".join(cmds), parse_mode=ParseMode.HTML)
 
@@ -463,6 +490,107 @@ async def removeaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🗑️ Unlinked {uid}")
 
 @debug_handler
+async def removeallaccs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove all Instagram accounts for a user"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 This command is for admins only")
+    
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "Usage: /removeallaccs <user_id>\n"
+            "Example: /removeallaccs 123456789"
+        )
+    
+    try:
+        user_id = int(context.args[0])
+        
+        async with AsyncSessionLocal() as s:
+            # Get count of accounts before deletion
+            count = (await s.execute(
+                text("SELECT COUNT(*) FROM allowed_accounts WHERE user_id = :u"),
+                {"u": user_id}
+            )).scalar() or 0
+            
+            if count == 0:
+                return await update.message.reply_text("❌ User has no linked accounts")
+            
+            # Delete all accounts
+            await s.execute(
+                text("DELETE FROM allowed_accounts WHERE user_id = :u"),
+                {"u": user_id}
+            )
+            await s.commit()
+            
+            # Get username for confirmation
+            try:
+                chat = await context.bot.get_chat(user_id)
+                user_name = chat.username or str(user_id)
+            except:
+                user_name = str(user_id)
+            
+            await update.message.reply_text(
+                f"✅ Removed all {count} accounts for @{user_name}"
+            )
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
+
+@debug_handler
+async def removeacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove a specific Instagram account for a user"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 This command is for admins only")
+    
+    if len(context.args) != 2:
+        return await update.message.reply_text(
+            "Usage: /removeacc <user_id> <@handle>\n"
+            "Example: /removeacc 123456789 johndoe"
+        )
+    
+    try:
+        user_id = int(context.args[0])
+        handle = context.args[1].lstrip("@")
+        
+        async with AsyncSessionLocal() as s:
+            # Check if account exists
+            exists = await s.execute(
+                text("""
+                    SELECT 1 FROM allowed_accounts 
+                    WHERE user_id = :u AND insta_handle = :h
+                """),
+                {"u": user_id, "h": handle}
+            )
+            
+            if not exists.scalar():
+                return await update.message.reply_text(
+                    f"❌ @{handle} is not linked to this user"
+                )
+            
+            # Delete the account
+            await s.execute(
+                text("""
+                    DELETE FROM allowed_accounts 
+                    WHERE user_id = :u AND insta_handle = :h
+                """),
+                {"u": user_id, "h": handle}
+            )
+            await s.commit()
+            
+            # Get username for confirmation
+            try:
+                chat = await context.bot.get_chat(user_id)
+                user_name = chat.username or str(user_id)
+            except:
+                user_name = str(user_id)
+            
+            await update.message.reply_text(
+                f"✅ Removed @{handle} from @{user_name}"
+            )
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
+
+@debug_handler
 async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import time
     from datetime import datetime
@@ -549,6 +677,7 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "h": reel_data['owner_username'],
                         "v": reel_data['view_count']
                     })
+                # Check for duplicate
                 dup = (await s.execute(text("SELECT 1 FROM reels WHERE shortcode=:c"), {"c": code})).scalar()
                 if dup:
                     results.append(f"⚠️ Already added: {link}")
@@ -1339,52 +1468,86 @@ async def removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def clearbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove submissions with less than 10k views after 7 days and update user total views."""
+    """Remove submissions with less than 10k views after 5 minutes and update user total views."""
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
+    
     async with AsyncSessionLocal() as s:
-        # Get submissions older than 7 days
+        # Get submissions older than 5 minutes
         old_submissions = await s.execute(text("""
-            SELECT r.shortcode, r.user_id, u.total_views
+            SELECT r.shortcode, r.user_id, u.total_views, u.username
             FROM reels r
             JOIN users u ON r.user_id = u.user_id
-            WHERE r.created_at < NOW() - INTERVAL '7 days'
+            WHERE r.created_at < NOW() - INTERVAL '5 minutes'
         """))
+        
         removed_count = 0
         affected_users = set()
-        for shortcode, user_id, views in old_submissions:
-            if views < 10000:
-                # Remove the submission
-                await s.execute(
-                    text("DELETE FROM reels WHERE shortcode = :s AND user_id = :u"),
-                    {"s": shortcode, "u": user_id}
-                )
-                removed_count += 1
-                affected_users.add(user_id)
-                # Notify user
-                try:
-                    await context.bot.send_message(
-                        user_id,
-                        f"⚠️ Your submission https://www.instagram.com/reel/{shortcode}/ "
-                        f"has been removed as it didn't reach 10k views within 7 days."
+        removal_details = []
+        
+        for shortcode, user_id, views, username in old_submissions:
+            try:
+                # Get current view count from API
+                reel_data = await get_reel_data(shortcode)
+                current_views = reel_data['view_count']
+                
+                if current_views < 10000:
+                    # Remove the submission
+                    await s.execute(
+                        text("DELETE FROM reels WHERE shortcode = :s AND user_id = :u"),
+                        {"s": shortcode, "u": user_id}
                     )
-                except Exception as e:
-                    logger.error(f"Failed to notify user {user_id}: {e}")
+                    removed_count += 1
+                    affected_users.add(user_id)
+                    removal_details.append(f"• @{username or user_id}: {shortcode} ({current_views:,} views)")
+                    
+                    # Notify user with professional message
+                    try:
+                        await context.bot.send_message(
+                            user_id,
+                            f"Dear Creator,\n\n"
+                            f"We regret to inform you that your submission https://www.instagram.com/reel/{shortcode}/ "
+                            f"did not meet our qualification criteria of 10,000 views within 5 minutes "
+                            f"(current views: {current_views:,})."
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to notify user {user_id}: {e}")
+            except Exception as e:
+                logger.error(f"Error processing reel {shortcode}: {e}")
+                continue
+        
         # Recalculate total_views for affected users
         for user_id in affected_users:
-            # Sum views for all remaining reels for this user
+            total_views = 0
+            # Get all remaining reels for this user
             reels = await s.execute(text("SELECT shortcode FROM reels WHERE user_id = :u"), {"u": user_id})
             codes = [r[0] for r in reels.fetchall()]
-            total_views = 0
+            
             for code in codes:
                 try:
                     reel_data = await get_reel_data(code)
                     total_views += reel_data['view_count']
-                except Exception:
-                    pass
-            await s.execute(text("UPDATE users SET total_views = :v WHERE user_id = :u"), {"v": total_views, "u": user_id})
+                except Exception as e:
+                    logger.error(f"Error getting views for reel {code}: {e}")
+            
+            # Update user's total views
+            await s.execute(
+                text("UPDATE users SET total_views = :v WHERE user_id = :u"),
+                {"v": total_views, "u": user_id}
+            )
+            
+            # Log the update
+            logger.info(f"Updated total views for user {user_id}: {total_views:,}")
+        
         await s.commit()
-        await update.message.reply_text(f"✅ Removed {removed_count} submissions with low views and updated user view counts.")
+        
+        # Build detailed response message
+        msg = [f"✅ Removed {removed_count} submissions with low views:"]
+        if removal_details:
+            msg.extend(removal_details)
+        msg.append("\nUser view counts have been updated.")
+        
+        await update.message.reply_text("\n".join(msg))
 
 @debug_handler
 async def addslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1867,6 +2030,334 @@ async def migrate_allowed_accounts():
             END$$;
         """))
 
+@debug_handler
+async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to link a referred user to their referrer"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 This command is for admins only")
+    
+    if len(context.args) != 2:
+        return await update.message.reply_text(
+            "Usage: /referral <referred_user_id> <referrer_id>\n"
+            "Example: /referral 123456789 987654321\n\n"
+            "This command links a user to their referrer for commission tracking."
+        )
+    
+    try:
+        referred_id = int(context.args[0])  # The user being referred
+        referrer_id = int(context.args[1])  # The user doing the referring
+        
+        if referred_id == referrer_id:
+            return await update.message.reply_text("❌ A user cannot refer themselves")
+        
+        async with AsyncSessionLocal() as s:
+            # Check if referred user exists
+            referred_user = await s.execute(
+                text("SELECT 1 FROM users WHERE user_id = :u"),
+                {"u": referred_id}
+            )
+            if not referred_user.scalar():
+                return await update.message.reply_text("❌ Referred user not found in database")
+            
+            # Check if referrer exists
+            referrer = await s.execute(
+                text("SELECT 1 FROM users WHERE user_id = :u"),
+                {"u": referrer_id}
+            )
+            if not referrer.scalar():
+                return await update.message.reply_text("❌ Referrer not found in database")
+            
+            # Check if referred user already has a referrer
+            existing = await s.execute(
+                text("SELECT 1 FROM referrals WHERE user_id = :u"),
+                {"u": referred_id}
+            )
+            if existing.scalar():
+                return await update.message.reply_text("❌ This user already has a referrer")
+            
+            # Check if referrer has a commission rate set
+            commission = await s.execute(
+                text("SELECT rate FROM commission_rates WHERE referrer_id = :u"),
+                {"u": referrer_id}
+            )
+            commission_rate = commission.scalar()
+            
+            # Create referral relationship
+            await s.execute(
+                text("""
+                    INSERT INTO referrals (user_id, referrer_id)
+                    VALUES (:u, :r)
+                """),
+                {"u": referred_id, "r": referrer_id}
+            )
+            await s.commit()
+            
+            # Get usernames for confirmation message
+            try:
+                referred_chat = await context.bot.get_chat(referred_id)
+                referrer_chat = await context.bot.get_chat(referrer_id)
+                referred_name = referred_chat.username or str(referred_id)
+                referrer_name = referrer_chat.username or str(referrer_id)
+            except:
+                referred_name = str(referred_id)
+                referrer_name = str(referrer_id)
+            
+            # Build confirmation message
+            msg = [
+                f"✅ Referral relationship created:",
+                f"• Referred User: @{referred_name}",
+                f"• Referrer: @{referrer_name}"
+            ]
+            
+            if commission_rate is not None:
+                msg.append(f"• Commission Rate: {commission_rate:.2f}%")
+            else:
+                msg.append("⚠️ No commission rate set for referrer")
+            
+            await update.message.reply_text("\n".join(msg))
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user IDs")
+
+@debug_handler
+async def referralstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View referral statistics for a user"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "Usage: /referralstats <user_id>\n"
+            "Example: /referralstats 123456789"
+        )
+    
+    try:
+        user_id = int(context.args[0])
+        
+        async with AsyncSessionLocal() as s:
+            # Get user's referrer
+            referrer = await s.execute(
+                text("""
+                    SELECT r.referrer_id, u.username
+                    FROM referrals r
+                    JOIN users u ON r.referrer_id = u.user_id
+                    WHERE r.user_id = :u
+                """),
+                {"u": user_id}
+            )
+            referrer_data = referrer.fetchone()
+            
+            # Get users referred by this user
+            referred = await s.execute(
+                text("""
+                    SELECT r.user_id, u.username, u.total_views
+                    FROM referrals r
+                    JOIN users u ON r.user_id = u.user_id
+                    WHERE r.referrer_id = :u
+                """),
+                {"u": user_id}
+            )
+            referred_users = referred.fetchall()
+            
+            # Get global commission rate
+            commission = await s.execute(
+                text("""
+                    SELECT value
+                    FROM config
+                    WHERE key = 'referral_commission_rate'
+                """)
+            )
+            commission_rate = float(commission.scalar() or 0)
+            
+            # Get user info
+            try:
+                chat = await context.bot.get_chat(user_id)
+                user_name = chat.username or str(user_id)
+            except:
+                user_name = str(user_id)
+            
+            # Build message
+            msg = [f"📊 <b>Referral Stats for @{user_name}</b>"]
+            
+            # Add commission rate
+            msg.append(f"\n💰 <b>Commission Rate:</b> {commission_rate:.2f}%")
+            
+            # Add referrer info
+            if referrer_data:
+                referrer_id, referrer_username = referrer_data
+                try:
+                    referrer_chat = await context.bot.get_chat(referrer_id)
+                    referrer_name = referrer_chat.username or str(referrer_id)
+                except:
+                    referrer_name = str(referrer_id)
+                msg.append(f"\n👤 <b>Referred by:</b> @{referrer_name}")
+            else:
+                msg.append("\n👤 <b>Referred by:</b> No referrer")
+            
+            # Add referred users info
+            if referred_users:
+                msg.append("\n👥 <b>Referred Users:</b>")
+                total_views = 0
+                for ref_id, ref_username, views in referred_users:
+                    try:
+                        ref_chat = await context.bot.get_chat(ref_id)
+                        ref_name = ref_chat.username or str(ref_id)
+                    except:
+                        ref_name = str(ref_id)
+                    views = views or 0
+                    total_views += views
+                    msg.append(f"• @{ref_name}: {views:,} views")
+                msg.append(f"\n📈 <b>Total Views from Referrals:</b> {total_views:,}")
+                
+                # Calculate potential commission
+                commission_amount = (total_views / 1000) * 0.025 * (commission_rate / 100)
+                msg.append(f"💰 <b>Potential Commission:</b> ${commission_amount:,.2f}")
+            else:
+                msg.append("\n👥 <b>Referred Users:</b> None")
+            
+            await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
+
+@debug_handler
+async def setcommission(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set global commission rate for all referrers"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 This command is for admins only")
+    
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "Usage: /setcommission <rate>\n"
+            "Example: /setcommission 5.00\n"
+            "Rate should be a percentage (e.g., 5.00 for 5%)"
+        )
+    
+    try:
+        rate = float(context.args[0])
+        
+        if rate < 0 or rate > 100:
+            return await update.message.reply_text("❌ Commission rate must be between 0 and 100")
+        
+        async with AsyncSessionLocal() as s:
+            # Update global commission rate
+            await s.execute(
+                text("""
+                    UPDATE config 
+                    SET value = :r 
+                    WHERE key = 'referral_commission_rate'
+                """),
+                {"r": str(rate)}
+            )
+            await s.commit()
+            
+            await update.message.reply_text(
+                f"✅ Global commission rate set to {rate:.2f}%\n"
+                f"This rate will apply to all referrers."
+            )
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid rate")
+
+@debug_handler
+async def getcommission(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View current global commission rate"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 This command is for admins only")
+    
+    async with AsyncSessionLocal() as s:
+        # Get global commission rate
+        rate = await s.execute(
+            text("""
+                SELECT value, updated_at
+                FROM config
+                WHERE key = 'referral_commission_rate'
+            """)
+        )
+        rate_data = rate.fetchone()
+        
+        if rate_data:
+            rate_value, updated_at = rate_data
+            await update.message.reply_text(
+                f"📊 Global Commission Rate:\n"
+                f"• Rate: {float(rate_value):.2f}%\n"
+                f"• Last updated: {updated_at.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        else:
+            await update.message.reply_text("ℹ️ No commission rate set")
+
+@debug_handler
+async def remove_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove USDT ERC20 address"""
+    user_id = update.effective_user.id
+    
+    async with AsyncSessionLocal() as s:
+        # Check if payment details exist
+        existing = await s.execute(
+            text("SELECT usdt_address FROM payment_details WHERE user_id = :u"),
+            {"u": user_id}
+        ).fetchone()
+        
+        if not existing or not existing[0]:
+            return await update.message.reply_text("❌ No USDT address found to remove.")
+        
+        # Remove USDT address
+        await s.execute(
+            text("UPDATE payment_details SET usdt_address = NULL WHERE user_id = :u"),
+            {"u": user_id}
+        )
+        await s.commit()
+        
+        await update.message.reply_text("✅ USDT address has been removed.")
+
+@debug_handler
+async def remove_paypal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove PayPal email"""
+    user_id = update.effective_user.id
+    
+    async with AsyncSessionLocal() as s:
+        # Check if payment details exist
+        existing = await s.execute(
+            text("SELECT paypal_email FROM payment_details WHERE user_id = :u"),
+            {"u": user_id}
+        ).fetchone()
+        
+        if not existing or not existing[0]:
+            return await update.message.reply_text("❌ No PayPal email found to remove.")
+        
+        # Remove PayPal email
+        await s.execute(
+            text("UPDATE payment_details SET paypal_email = NULL WHERE user_id = :u"),
+            {"u": user_id}
+        )
+        await s.commit()
+        
+        await update.message.reply_text("✅ PayPal email has been removed.")
+
+@debug_handler
+async def remove_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove UPI address"""
+    user_id = update.effective_user.id
+    
+    async with AsyncSessionLocal() as s:
+        # Check if payment details exist
+        existing = await s.execute(
+            text("SELECT upi_address FROM payment_details WHERE user_id = :u"),
+            {"u": user_id}
+        ).fetchone()
+        
+        if not existing or not existing[0]:
+            return await update.message.reply_text("❌ No UPI address found to remove.")
+        
+        # Remove UPI address
+        await s.execute(
+            text("UPDATE payment_details SET upi_address = NULL WHERE user_id = :u"),
+            {"u": user_id}
+        )
+        await s.commit()
+        
+        await update.message.reply_text("✅ UPI address has been removed.")
+
 async def run_bot():
     await init_db()
     await ensure_config_table()
@@ -1880,6 +2371,7 @@ async def run_bot():
     
     handlers = [
         ("start", start_cmd), ("addaccount", addaccount), ("removeaccount", removeaccount),
+        ("removeallaccs", removeallaccs), ("removeacc", removeacc),
         ("submit", submit), ("remove", remove), ("cleardata", cleardata),
         ("allstats", allstats), ("currentstats", currentstats), ("creatorstats", creatorstats),
         ("broadcast", broadcast), ("export", export), ("addusdt", add_usdt),
@@ -1887,6 +2379,8 @@ async def run_bot():
         ("forceupdate", forceupdate), ("addadmin", addadmin), ("removeadmin", removeadmin),
         ("clearbad", clearbad), ("addslot", addslot), ("removeslot", removeslot),
         ("slotstats", slotstats), ("lbpng", lbpng), ("setmindate", setmindate), ("getmindate", getmindate),
+        ("referral", referral), ("referralstats", referralstats),
+        ("setcommission", setcommission), ("getcommission", getcommission),
     ]
     for cmd, h in handlers:
         app.add_handler(CommandHandler(cmd, h))
@@ -1899,4 +2393,4 @@ async def run_bot():
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    asyncio.run(run_bot()) 
+    asyncio.run(run_bot())
