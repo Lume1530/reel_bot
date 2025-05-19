@@ -331,6 +331,9 @@ async def start_daily_updates():
 # Global dict for submit cooldowns
 submit_cooldowns = {}
 
+# Add at the top with other global variables
+force_update_lock = asyncio.Lock()
+
 @debug_handler
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmds = [
@@ -597,6 +600,14 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from datetime import datetime
     user_id = update.effective_user.id
     now = time.time()
+    
+    # Check if force update is running
+    if force_update_lock.locked():
+        return await update.message.reply_text(
+            "⏳ Please wait a moment. The system is currently updating view counts.\n"
+            "Try submitting again in a few seconds."
+        )
+    
     # Cooldown check
     last_time = submit_cooldowns.get(user_id, 0)
     if now - last_time < 30:
@@ -1399,13 +1410,95 @@ async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
     
-    await update.message.reply_text("🔄 Starting view count update...")
+    # Try to acquire the lock
+    if not await force_update_lock.acquire():
+        return await update.message.reply_text(
+            "⏳ Another force update is already in progress.\n"
+            "Please wait for it to complete before starting a new one."
+        )
+    
     try:
-        await update_all_reel_views()
-        await update.message.reply_text("✅ View count update completed!")
+        await update.message.reply_text("🔄 Starting view count update...")
+        
+        async with AsyncSessionLocal() as s:
+            # Get all unique reels
+            reels = (await s.execute(text("SELECT DISTINCT shortcode FROM reels"))).fetchall()
+            total_reels = len(reels)
+            
+            if total_reels == 0:
+                return await update.message.reply_text("No reels found to update.")
+            
+            await update.message.reply_text(f"Found {total_reels} reels to update. Processing in batches...")
+            
+            # Process in batches of 10
+            batch_size = 10
+            total_updated = 0
+            batch_count = 0
+            
+            for i in range(0, total_reels, batch_size):
+                batch = reels[i:i + batch_size]
+                batch_count += 1
+                
+                for (shortcode,) in batch:
+                    try:
+                        # Get current view count from API
+                        reel_data = await get_reel_data(shortcode)
+                        new_views = reel_data['view_count']
+                        
+                        # Get the user who owns this reel
+                        user = (await s.execute(
+                            text("SELECT user_id FROM reels WHERE shortcode = :s"),
+                            {"s": shortcode}
+                        )).fetchone()
+                        
+                        if user:
+                            user_id = user[0]
+                            # Get current total views
+                            current = (await s.execute(
+                                text("SELECT total_views FROM users WHERE user_id = :u"),
+                                {"u": user_id}
+                            )).fetchone()
+                            
+                            if current:
+                                current_views = current[0] or 0
+                                # Update total views
+                                await s.execute(
+                                    text("UPDATE users SET total_views = :v WHERE user_id = :u"),
+                                    {"v": new_views, "u": user_id}
+                                )
+                                total_updated += 1
+                                logger.info(f"Updated views for user {user_id}: {current_views} -> {new_views}")
+                    
+                    except Exception as e:
+                        logger.error(f"Error updating views for reel {shortcode}: {str(e)}")
+                        continue
+                
+                # Commit after each batch
+                await s.commit()
+                
+                # Send progress update every 5 batches
+                if batch_count % 5 == 0:
+                    progress = min(i + batch_size, total_reels)
+                    await update.message.reply_text(
+                        f"🔄 Progress: {progress}/{total_reels} reels processed\n"
+                        f"✅ {total_updated} updates completed"
+                    )
+                
+                # Small delay between batches to prevent overload
+                await asyncio.sleep(1)
+            
+            await update.message.reply_text(
+                f"✅ View count update completed!\n"
+                f"• Total reels processed: {total_reels}\n"
+                f"• Successful updates: {total_updated}"
+            )
+            
     except Exception as e:
         logger.error(f"Error in forceupdate: {str(e)}")
         await update.message.reply_text(f"❌ Error updating views: {str(e)}")
+    finally:
+        # Always release the lock when done
+        force_update_lock.release()
 
 @debug_handler
 async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
