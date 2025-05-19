@@ -370,6 +370,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/addslot &lt;1|2&gt; &lt;handle1&gt; &lt;handle2&gt; ...</code> - Add handles to slot",
             "• <code>/removeslot &lt;1|2&gt; &lt;handle&gt;</code> - Remove handle from slot",
             "• <code>/slotstats</code> - Show current handles and submissions in slots",
+            "• <code>/slotdata &lt;1|2&gt;</code> - Show and clear slot submissions",
             "• <code>/addadmin &lt;user_id&gt;</code> - Add new admin",
             "• <code>/removeadmin &lt;user_id&gt;</code> - Remove admin",
             "",
@@ -725,19 +726,42 @@ async def cleardata(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def addviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add views to a user's total"""
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
-    if len(context.args) != 2:
-        return await update.message.reply_text("Usage: /addviews <user_id> <views>")
-    tid, v = map(int, context.args)
-    async with AsyncSessionLocal() as s:
-        exists = (await s.execute(text("SELECT 1 FROM users WHERE user_id=:u"), {"u": tid})).scalar()
-        if exists:
-            await s.execute(text("UPDATE users SET total_views=total_views+:v WHERE user_id=:u"), {"v": v, "u": tid})
-        else:
-            await s.execute(text("INSERT INTO users(user_id,username,total_views) VALUES(:u,NULL,:v)"), {"u": tid, "v": v})
-        await s.commit()
-    await update.message.reply_text(f"✅ Added {v} views to {tid}")
+    
+    if len(context.args) != 1:
+        return await update.message.reply_text("Usage: /addviews <user_id>")
+    
+    try:
+        user_id = int(context.args[0])
+        views_to_add = 10000  # Fixed amount of views to add
+        
+        async with AsyncSessionLocal() as s:
+            exists = (await s.execute(text("SELECT 1 FROM users WHERE user_id=:u"), {"u": user_id})).scalar()
+            if exists:
+                await s.execute(
+                    text("UPDATE users SET total_views=total_views+:v WHERE user_id=:u"),
+                    {"v": views_to_add, "u": user_id}
+                )
+            else:
+                await s.execute(
+                    text("INSERT INTO users(user_id,username,total_views) VALUES(:u,NULL,:v)"),
+                    {"u": user_id, "v": views_to_add}
+                )
+            await s.commit()
+            
+            # Get username for confirmation
+            try:
+                chat = await context.bot.get_chat(user_id)
+                user_name = chat.username or str(user_id)
+            except:
+                user_name = str(user_id)
+            
+            await update.message.reply_text(f"✅ Added {views_to_add:,} views to @{user_name}")
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
 
 @debug_handler
 async def removeviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -789,12 +813,10 @@ async def allstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 u.user_id, 
                 u.username, 
                 u.total_views, 
-                a.insta_handle,
                 p.usdt_address,
                 p.paypal_email,
                 p.upi_address
             FROM users u
-            LEFT JOIN allowed_accounts a ON u.user_id = a.user_id
             LEFT JOIN payment_details p ON u.user_id = p.user_id
             WHERE u.total_views > 0
             ORDER BY u.total_views DESC
@@ -804,7 +826,7 @@ async def allstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await update.message.reply_text("No creator statistics available.")
         
         # Send stats for each creator
-        for user_id, username, views, insta_handle, usdt, paypal, upi in users:
+        for user_id, username, views, usdt, paypal, upi in users:
             views = float(views)
             # Calculate payable amount (views * 0.025 per 1000 views)
             payable_amount = (views / 1000) * 0.025
@@ -816,35 +838,44 @@ async def allstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 full_name = str(user_id)
             
+            # Get total videos count
+            total_videos = (await s.execute(
+                text("SELECT COUNT(*) FROM reels WHERE user_id = :u"),
+                {"u": user_id}
+            )).scalar() or 0
+            
+            # Get all Instagram handles
+            handles = [r[0] for r in (await s.execute(
+                text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :u"),
+                {"u": user_id}
+            )).fetchall()]
+            
             msg = [
-                f"👤 <b>Creator: {full_name}</b>",
-                f"• Username: @{username or '—'}",
-                f"• Instagram: @{insta_handle or '—'}",
-                f"• Total Views: <b>{int(views):,}</b>",
-                f"• Payable Amount: <b>${payable_amount:,.2f}</b>",
-                f"• Rate: <b>$25 per 1M Views</b>",
+                f"👤 <b>Telegram Username:</b> {full_name}",
+                f"📊 <b>Total Views:</b> {int(views):,}",
+                f"🎥 <b>Total Videos:</b> {total_videos}",
+                f"👥 <b>Total Accounts:</b> {len(handles)}",
                 "",
-                "💰 <b>Payment Details:</b>"
+                "📱 <b>Account Names:</b>"
             ]
             
-            # Add payment methods if they exist
-            if usdt:
-                msg.append(f"• USDT: <code>{usdt}</code>")
-            if paypal:
-                msg.append(f"• PayPal: <code>{paypal}</code>")
-            if upi:
-                msg.append(f"• UPI: <code>{upi}</code>")
-            if not any([usdt, paypal, upi]):
-                msg.append("• No payment methods added")
+            # Add account names
+            if handles:
+                msg.extend([f"• @{h}" for h in handles])
+            else:
+                msg.append("• No accounts")
             
-            msg.append("━━━━━━━━━━━━━━━━━━━━")
+            msg.extend([
+                "",
+                f"💰 <b>Payable Amount:</b> ${payable_amount:,.2f}",
+                "━━━━━━━━━━━━━━━━━━━━"
+            ])
             
             await context.bot.send_message(
                 update.effective_chat.id,
                 "\n".join(msg),
                 parse_mode=ParseMode.HTML
             )
-            await asyncio.sleep(0.5)  # Small delay between messages
 
 @debug_handler
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1558,7 +1589,8 @@ async def addslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         return await update.message.reply_text(
             "Usage: /addslot <slot_number> <handle1> <handle2> ...\n"
-            "Example: /addslot 1 johndoe janedoe"
+            "Example: /addslot 1 johndoe janedoe\n\n"
+            "This will replace all existing handles in the slot with the new ones."
         )
     
     try:
@@ -1569,6 +1601,13 @@ async def addslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         handles = [h.lstrip('@') for h in context.args[1:]]
         
         async with AsyncSessionLocal() as s:
+            # Get current handles in the slot
+            current_handles = await s.execute(
+                text("SELECT insta_handle FROM slot_accounts WHERE slot_number = :s"),
+                {"s": slot_number}
+            )
+            current_handles = [h[0] for h in current_handles.fetchall()]
+            
             # Remove existing handles for this slot
             await s.execute(
                 text("DELETE FROM slot_accounts WHERE slot_number = :s"),
@@ -1587,24 +1626,40 @@ async def addslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await s.commit()
             
-            await update.message.reply_text(
-                f"✅ Added {len(handles)} handles to slot {slot_number}:\n" +
-                "\n".join(f"• @{h}" for h in handles)
-            )
+            # Build response message
+            msg = [
+                f"✅ Updated slot {slot_number}:",
+                "",
+                "📤 <b>Previous Handles:</b>"
+            ]
+            
+            if current_handles:
+                msg.extend([f"• @{h}" for h in current_handles])
+            else:
+                msg.append("• No handles")
+            
+            msg.extend([
+                "",
+                "📥 <b>New Handles:</b>",
+                *[f"• @{h}" for h in handles]
+            ])
+            
+            await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
             
     except ValueError:
         await update.message.reply_text("❌ Invalid slot number")
 
 @debug_handler
 async def removeslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove a handle from a specific slot"""
+    """Remove handles from a specific slot"""
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
     
-    if len(context.args) != 2:
+    if len(context.args) < 2:
         return await update.message.reply_text(
-            "Usage: /removeslot <slot_number> <handle>\n"
-            "Example: /removeslot 1 johndoe"
+            "Usage: /removeslot <slot_number> <handle1> <handle2> ...\n"
+            "Example: /removeslot 1 johndoe janedoe\n\n"
+            "This will remove the specified handles from the slot."
         )
     
     try:
@@ -1612,36 +1667,71 @@ async def removeslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if slot_number not in [1, 2]:
             return await update.message.reply_text("❌ Slot number must be 1 or 2")
         
-        handle = context.args[1].lstrip('@')
+        handles = [h.lstrip('@') for h in context.args[1:]]
         
         async with AsyncSessionLocal() as s:
-            # Check if handle exists in the slot
-            existing = await s.execute(
-                text("""
-                    SELECT 1 FROM slot_accounts 
-                    WHERE slot_number = :s AND insta_handle = :h
-                """),
-                {"s": slot_number, "h": handle}
+            # Get current handles in the slot
+            current_handles = await s.execute(
+                text("SELECT insta_handle FROM slot_accounts WHERE slot_number = :s"),
+                {"s": slot_number}
             )
+            current_handles = [h[0] for h in current_handles.fetchall()]
             
-            if not existing.scalar():
-                return await update.message.reply_text(
-                    f"❌ @{handle} is not in slot {slot_number}"
-                )
+            # Remove specified handles
+            removed = []
+            not_found = []
             
-            # Remove handle from slot
-            await s.execute(
-                text("""
-                    DELETE FROM slot_accounts 
-                    WHERE slot_number = :s AND insta_handle = :h
-                """),
-                {"s": slot_number, "h": handle}
-            )
+            for handle in handles:
+                # Check if handle exists in the slot
+                if handle in current_handles:
+                    await s.execute(
+                        text("""
+                            DELETE FROM slot_accounts 
+                            WHERE slot_number = :s AND insta_handle = :h
+                        """),
+                        {"s": slot_number, "h": handle}
+                    )
+                    removed.append(handle)
+                else:
+                    not_found.append(handle)
+            
             await s.commit()
             
-            await update.message.reply_text(
-                f"✅ Removed @{handle} from slot {slot_number}"
+            # Get remaining handles
+            remaining = await s.execute(
+                text("SELECT insta_handle FROM slot_accounts WHERE slot_number = :s"),
+                {"s": slot_number}
             )
+            remaining = [h[0] for h in remaining.fetchall()]
+            
+            # Build response message
+            msg = [f"📊 <b>Slot {slot_number} Update</b>"]
+            
+            if removed:
+                msg.extend([
+                    "",
+                    "✅ <b>Removed Handles:</b>",
+                    *[f"• @{h}" for h in removed]
+                ])
+            
+            if not_found:
+                msg.extend([
+                    "",
+                    "⚠️ <b>Not Found in Slot:</b>",
+                    *[f"• @{h}" for h in not_found]
+                ])
+            
+            msg.extend([
+                "",
+                "📋 <b>Remaining Handles:</b>"
+            ])
+            
+            if remaining:
+                msg.extend([f"• @{h}" for h in remaining])
+            else:
+                msg.append("• No handles")
+            
+            await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
             
     except ValueError:
         await update.message.reply_text("❌ Invalid slot number")
@@ -1741,59 +1831,6 @@ async def slotstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg.append("  - No handles added")
         
         await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
-
-async def process_slots(bot):
-    """Process slot submissions every 5 minutes (for testing)"""
-    while True:
-        try:
-            # Wait 5 minutes
-            await asyncio.sleep(300)  # 5 minutes = 300 seconds
-            
-            logger.info("Processing slot submissions...")
-            
-            # Process slots
-            async with AsyncSessionLocal() as s:
-                for slot_number in [1, 2]:
-                    # Get all submissions for this slot
-                    submissions = await s.execute(text("""
-                        SELECT shortcode, insta_handle, view_count
-                        FROM slot_submissions
-                        WHERE slot_number = :s
-                        ORDER BY submitted_at
-                    """), {"s": slot_number})
-                    
-                    if submissions:
-                        # Create text file
-                        lines = []
-                        for shortcode, handle, views in submissions:
-                            lines.append(f"@{handle}: https://www.instagram.com/reel/{shortcode}/ ({views:,} views)")
-                        
-                        # Send to admins
-                        for admin_id in ADMIN_IDS:
-                            try:
-                                import io
-                                buf = io.BytesIO("\n".join(lines).encode())
-                                buf.name = f"slot{slot_number}_submissions.txt"
-                                
-                                await bot.send_document(
-                                    admin_id,
-                                    document=buf,
-                                    caption=f"📋 Slot {slot_number} submissions (5min test)"
-                                )
-                            except Exception as e:
-                                logger.error(f"Failed to send slot {slot_number} to admin {admin_id}: {e}")
-                        
-                        # Clear slot submissions
-                        await s.execute(
-                            text("DELETE FROM slot_submissions WHERE slot_number = :s"),
-                            {"s": slot_number}
-                        )
-                
-                await s.commit()
-            
-        except Exception as e:
-            logger.error(f"Error in slot processing: {str(e)}")
-            await asyncio.sleep(60)  # Wait a minute before retrying if there's an error
 
 @debug_handler
 async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2374,6 +2411,109 @@ async def remove_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text("✅ UPI address has been removed.")
 
+@debug_handler
+async def slotdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show submissions for a specific slot"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "Usage: /slotdata <slot_number>\n"
+            "Example: /slotdata 1\n"
+            "This will show all current submissions in the specified slot."
+        )
+    
+    try:
+        slot_number = int(context.args[0])
+        if slot_number not in [1, 2]:
+            return await update.message.reply_text("❌ Slot number must be 1 or 2")
+        
+        async with AsyncSessionLocal() as s:
+            # Get all submissions for this slot
+            submissions = await s.execute(
+                text("""
+                    SELECT shortcode, insta_handle, view_count, submitted_at
+                    FROM slot_submissions
+                    WHERE slot_number = :s
+                    ORDER BY submitted_at DESC
+                """),
+                {"s": slot_number}
+            )
+            submissions_data = submissions.fetchall()
+            
+            if not submissions_data:
+                return await update.message.reply_text(f"ℹ️ No submissions found in slot {slot_number}")
+            
+            # Build message with submission details
+            msg = [f"📊 <b>Slot {slot_number} Submissions</b>"]
+            
+            total_views = 0
+            total_videos = len(submissions_data)
+            
+            msg.append(f"\n📈 <b>Total Videos:</b> {total_videos}")
+            
+            for shortcode, handle, views, submitted_at in submissions_data:
+                views = views or 0
+                total_views += views
+                msg.append(
+                    f"\n• @{handle}\n"
+                    f"  - Link: https://www.instagram.com/reel/{shortcode}/\n"
+                    f"  - Views: {views:,}\n"
+                    f"  - Submitted: {submitted_at.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+            
+            msg.append(f"\n📈 <b>Total Views:</b> {total_views:,}")
+            
+            # Send the message
+            await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid slot number")
+
+@debug_handler
+async def clearslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear submissions for a specific slot"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "Usage: /clearslot <slot_number>\n"
+            "Example: /clearslot 1\n"
+            "This will clear all submissions in the specified slot."
+        )
+    
+    try:
+        slot_number = int(context.args[0])
+        if slot_number not in [1, 2]:
+            return await update.message.reply_text("❌ Slot number must be 1 or 2")
+        
+        async with AsyncSessionLocal() as s:
+            # Get count of submissions before clearing
+            count = await s.execute(
+                text("SELECT COUNT(*) FROM slot_submissions WHERE slot_number = :s"),
+                {"s": slot_number}
+            )
+            submission_count = count.scalar() or 0
+            
+            # Clear the slot submissions
+            await s.execute(
+                text("DELETE FROM slot_submissions WHERE slot_number = :s"),
+                {"s": slot_number}
+            )
+            await s.commit()
+            
+            # Send confirmation
+            await update.message.reply_text(
+                f"✅ Slot {slot_number} has been cleared.\n"
+                f"Removed {submission_count} submissions.\n"
+                f"The slot is now ready for new submissions."
+            )
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid slot number")
+
 async def run_bot():
     await init_db()
     await ensure_config_table()
@@ -2382,8 +2522,6 @@ async def run_bot():
     asyncio.create_task(start_daily_updates())
     
     app = ApplicationBuilder().token(TOKEN).build()
-    # Start slot processing with bot instance
-    asyncio.create_task(process_slots(app.bot))
     
     handlers = [
         ("start", start_cmd), ("addaccount", addaccount), ("removeaccount", removeaccount),
@@ -2394,7 +2532,8 @@ async def run_bot():
         ("addpaypal", add_paypal), ("addupi", add_upi), ("review", review),
         ("forceupdate", forceupdate), ("addadmin", addadmin), ("removeadmin", removeadmin),
         ("clearbad", clearbad), ("addslot", addslot), ("removeslot", removeslot),
-        ("slotstats", slotstats), ("lbpng", lbpng), ("setmindate", setmindate), ("getmindate", getmindate),
+        ("slotstats", slotstats), ("slotdata", slotdata), ("clearslot", clearslot), ("lbpng", lbpng),
+        ("setmindate", setmindate), ("getmindate", getmindate),
         ("referral", referral), ("referralstats", referralstats),
         ("setcommission", setcommission), ("getcommission", getcommission),
     ]
