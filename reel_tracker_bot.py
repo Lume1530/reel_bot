@@ -1004,6 +1004,9 @@ async def creatorstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @debug_handler
 async def currentstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show current total views, payable amount, and working accounts"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    
     async with AsyncSessionLocal() as s:
         # Get total views across all users
         total_views = (await s.execute(text("SELECT COALESCE(SUM(total_views), 0) FROM users"))).scalar() or 0
@@ -1012,6 +1015,9 @@ async def currentstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get total working accounts (users with linked Instagram accounts)
         working_accounts = (await s.execute(text("SELECT COUNT(DISTINCT user_id) FROM allowed_accounts"))).scalar() or 0
         
+        # Get total videos
+        total_videos = (await s.execute(text("SELECT COUNT(*) FROM reels"))).scalar() or 0
+        
         # Calculate payable amount (views * 0.025 per 1000 views)
         payable_amount = (total_views / 1000) * 0.025
         
@@ -1019,6 +1025,7 @@ async def currentstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = [
             "📊 <b>Current Statistics</b>",
             f"• Total Views: <b>{int(total_views):,}</b>",
+            f"• Total Videos: <b>{total_videos:,}</b>",
             f"• Working Accounts: <b>{working_accounts}</b>",
             f"• Payable Amount: <b>${payable_amount:,.2f}</b>",
             "",
