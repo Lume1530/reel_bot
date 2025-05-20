@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
 import io
 import time
-import sys
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -35,34 +34,11 @@ if not all([TOKEN, DATABASE_URL, ENSEMBLE_TOKEN]):
     exit(1)
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
-# Create logs directory if it doesn't exist
-if not os.path.exists('logs'):
-    os.makedirs('logs')
-
-# Configure logging with both file and console handlers
-class ConsoleAndFileHandler(logging.Handler):
-    def __init__(self, filename):
-        super().__init__()
-        self.file_handler = logging.FileHandler(filename)
-        self.console_handler = logging.StreamHandler(sys.stdout)
-        
-        # Set format for both handlers
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        self.file_handler.setFormatter(formatter)
-        self.console_handler.setFormatter(formatter)
-        
-    def emit(self, record):
-        # Write to both file and console
-        self.file_handler.emit(record)
-        self.console_handler.emit(record)
-
-# Set up logging
-logger = logging.getLogger('reel_bot')
-logger.setLevel(logging.INFO)
-
-# Add our custom handler
-console_file_handler = ConsoleAndFileHandler('logs/bot.log')
-logger.addHandler(console_file_handler)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # ─── FastAPI health check ──────────────────────────────────────────────────────
 app_fastapi = FastAPI()
@@ -643,124 +619,116 @@ async def removeacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle reel submission"""
-    try:
-        logger.info(f"Received submission request from user {update.effective_user.id}")
-        
-        # Check if update is in progress
-        if force_update_lock.locked():
-            logger.warning(f"User {update.effective_user.id} tried to submit while update was in progress")
-            await update.message.reply_text("⚠️ System is currently updating view counts. Please try again in a few minutes.")
-            return
+    import time
+    from datetime import datetime
+    from logger import log_submission
+    
+    user_id = update.effective_user.id
+    now = time.time()
+    
+    # Check if force update is running
+    if force_update_lock.locked():
+        return await update.message.reply_text(
+            "⏳ Please wait a moment. The system is currently updating view counts.\n"
+            "Try submitting again in a few seconds."
+        )
+    
+    # Cooldown check
+    last_time = submit_cooldowns.get(user_id, 0)
+    if now - last_time < 30:
+        wait = int(30 - (now - last_time))
+        return await update.message.reply_text(f"⏳ Please wait {wait} seconds before submitting again.")
+    submit_cooldowns[user_id] = now
 
-        import time
-        from datetime import datetime
-        from logger import log_submission
-        
-        user_id = update.effective_user.id
-        now = time.time()
-        
-        # Cooldown check
-        last_time = submit_cooldowns.get(user_id, 0)
-        if now - last_time < 30:
-            wait = int(30 - (now - last_time))
-            return await update.message.reply_text(f"⏳ Please wait {wait} seconds before submitting again.")
-        submit_cooldowns[user_id] = now
+    if not context.args:
+        return await update.message.reply_text("❗ Provide up to 5 reel links, separated by commas.")
+    # Join all args and split by comma
+    raw = " ".join(context.args)
+    links = [l.strip() for l in raw.split(",") if l.strip()]
+    if not links or len(links) > 5:
+        return await update.message.reply_text("❗ You can submit up to 5 links at once, separated by commas.")
 
-        if not context.args:
-            return await update.message.reply_text("❗ Provide up to 5 reel links, separated by commas.")
-        # Join all args and split by comma
-        raw = " ".join(context.args)
-        links = [l.strip() for l in raw.split(",") if l.strip()]
-        if not links or len(links) > 5:
-            return await update.message.reply_text("❗ You can submit up to 5 links at once, separated by commas.")
-
-        uid = user_id
-        results = []
-        min_date_str = await get_min_date()
-        min_date = parse_date(min_date_str) if min_date_str else None
-        async with AsyncSessionLocal() as s:
-            # Check if user exists, if not create it
-            user = (await s.execute(text("SELECT total_views FROM users WHERE user_id = :u"), {"u": uid})).fetchone()
-            if not user:
-                await s.execute(
-                    text("INSERT INTO users (user_id, username, total_views) VALUES (:u, :n, 0)"),
-                    {"u": uid, "n": update.effective_user.username}
-                )
-                await s.commit()
-                current_views = 0
-            else:
-                current_views = user[0] or 0
-            # Fetch all linked Instagram handles for the user
-            accounts = [r[0].lower() for r in (await s.execute(
-                text("SELECT insta_handle FROM allowed_accounts WHERE user_id=:u"), {"u": uid}
-            )).fetchall()]
-            if not accounts:
-                return await update.message.reply_text("🚫 No IG linked—ask admin to /addaccount.")
-            for link in links:
-                m = re.search(r"^(?:https?://)?(?:www\.|m\.)?instagram\.com/(?:(?P<sup>[^/]+)/)?reel/(?P<code>[^/?#&]+)", link)
-                if not m:
-                    results.append(f"❌ Invalid: {link}")
-                    continue
-                sup, code = m.group("sup"), m.group("code")
-                try:
-                    reel_data = await get_reel_data(code)
-                    # Check min date
-                    upload_date = None
-                    if 'taken_at_timestamp' in reel_data:
-                        upload_date = datetime.utcfromtimestamp(reel_data['taken_at_timestamp']).date()
-                    elif 'upload_date' in reel_data:
-                        upload_date = datetime.strptime(reel_data['upload_date'], "%Y-%m-%d").date()
-                    if min_date and upload_date and upload_date < min_date:
-                        results.append(f"🚫 Too old: {link} (uploaded {upload_date}, min allowed {min_date})")
-                        continue
-                    # Check if the reel owner matches any linked account
-                    if reel_data['owner_username'].lower() not in accounts:
-                        results.append(f"🚫 Not your reel: {link}")
-                        continue
-                    # Update total views in users table
-                    new_views = current_views + reel_data['view_count']
-                    await s.execute(
-                        text("UPDATE users SET total_views = :v WHERE user_id = :u"),
-                        {"v": new_views, "u": uid}
-                    )
-                    # Check if this handle belongs to a slot
-                    slot = await s.execute(text("""
-                        SELECT slot_number FROM slot_accounts 
-                        WHERE LOWER(insta_handle) = LOWER(:h)
-                    """), {"h": reel_data['owner_username']})
-                    slot_result = slot.fetchone()
-                    if slot_result:
-                        slot_number = slot_result[0]
-                        await s.execute(text("""
-                            INSERT INTO slot_submissions (slot_number, shortcode, insta_handle, view_count)
-                            VALUES (:s, :c, :h, :v)
-                        """), {
-                            "s": slot_number,
-                            "c": code,
-                            "h": reel_data['owner_username'],
-                            "v": reel_data['view_count']
-                        })
-                    # Check for duplicate
-                    dup = (await s.execute(text("SELECT 1 FROM reels WHERE shortcode=:c"), {"c": code})).scalar()
-                    if dup:
-                        results.append(f"⚠️ Already added: {link}")
-                        continue
-                    await s.execute(text("INSERT INTO reels(user_id,shortcode) VALUES(:u,:c)"), {"u": uid, "c": code})
-                    
-                    # Log the submission
-                    await log_submission(s, uid, code, reel_data['view_count'], reel_data['owner_username'])
-                    
-                    results.append(f"✅ Added: {link}")
-                except Exception as e:
-                    results.append(f"❌ Error: {link} ({str(e)})")
+    uid = user_id
+    results = []
+    min_date_str = await get_min_date()
+    min_date = parse_date(min_date_str) if min_date_str else None
+    async with AsyncSessionLocal() as s:
+        # Check if user exists, if not create it
+        user = (await s.execute(text("SELECT total_views FROM users WHERE user_id = :u"), {"u": uid})).fetchone()
+        if not user:
+            await s.execute(
+                text("INSERT INTO users (user_id, username, total_views) VALUES (:u, :n, 0)"),
+                {"u": uid, "n": update.effective_user.username}
+            )
             await s.commit()
-        await update.message.reply_text("\n".join(results))
-        logger.info(f"Successfully processed submission for user {update.effective_user.id}")
-
-    except Exception as e:
-        logger.error(f"Error in submit command: {str(e)}")
-        await update.message.reply_text("❌ An error occurred while processing your submission.")
+            current_views = 0
+        else:
+            current_views = user[0] or 0
+        # Fetch all linked Instagram handles for the user
+        accounts = [r[0].lower() for r in (await s.execute(
+            text("SELECT insta_handle FROM allowed_accounts WHERE user_id=:u"), {"u": uid}
+        )).fetchall()]
+        if not accounts:
+            return await update.message.reply_text("🚫 No IG linked—ask admin to /addaccount.")
+        for link in links:
+            m = re.search(r"^(?:https?://)?(?:www\.|m\.)?instagram\.com/(?:(?P<sup>[^/]+)/)?reel/(?P<code>[^/?#&]+)", link)
+            if not m:
+                results.append(f"❌ Invalid: {link}")
+                continue
+            sup, code = m.group("sup"), m.group("code")
+            try:
+                reel_data = await get_reel_data(code)
+                # Check min date
+                upload_date = None
+                if 'taken_at_timestamp' in reel_data:
+                    upload_date = datetime.utcfromtimestamp(reel_data['taken_at_timestamp']).date()
+                elif 'upload_date' in reel_data:
+                    upload_date = datetime.strptime(reel_data['upload_date'], "%Y-%m-%d").date()
+                if min_date and upload_date and upload_date < min_date:
+                    results.append(f"🚫 Too old: {link} (uploaded {upload_date}, min allowed {min_date})")
+                    continue
+                # Check if the reel owner matches any linked account
+                if reel_data['owner_username'].lower() not in accounts:
+                    results.append(f"🚫 Not your reel: {link}")
+                    continue
+                # Update total views in users table
+                new_views = current_views + reel_data['view_count']
+                await s.execute(
+                    text("UPDATE users SET total_views = :v WHERE user_id = :u"),
+                    {"v": new_views, "u": uid}
+                )
+                # Check if this handle belongs to a slot
+                slot = await s.execute(text("""
+                    SELECT slot_number FROM slot_accounts 
+                    WHERE LOWER(insta_handle) = LOWER(:h)
+                """), {"h": reel_data['owner_username']})
+                slot_result = slot.fetchone()
+                if slot_result:
+                    slot_number = slot_result[0]
+                    await s.execute(text("""
+                        INSERT INTO slot_submissions (slot_number, shortcode, insta_handle, view_count)
+                        VALUES (:s, :c, :h, :v)
+                    """), {
+                        "s": slot_number,
+                        "c": code,
+                        "h": reel_data['owner_username'],
+                        "v": reel_data['view_count']
+                    })
+                # Check for duplicate
+                dup = (await s.execute(text("SELECT 1 FROM reels WHERE shortcode=:c"), {"c": code})).scalar()
+                if dup:
+                    results.append(f"⚠️ Already added: {link}")
+                    continue
+                await s.execute(text("INSERT INTO reels(user_id,shortcode) VALUES(:u,:c)"), {"u": uid, "c": code})
+                
+                # Log the submission
+                await log_submission(s, uid, code, reel_data['view_count'], reel_data['owner_username'])
+                
+                results.append(f"✅ Added: {link}")
+            except Exception as e:
+                results.append(f"❌ Error: {link} ({str(e)})")
+        await s.commit()
+    await update.message.reply_text("\n".join(results))
 
 @debug_handler
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1475,55 +1443,54 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
 @debug_handler
 async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Force update all reel views"""
+    from logger import log_view_update, log_force_update
+    
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    
+    # Try to acquire the lock
+    if not await force_update_lock.acquire():
+        return await update.message.reply_text(
+            "⏳ Another force update is already in progress.\n"
+            "Please wait for it to complete before starting a new one."
+        )
+    
     try:
-        logger.info(f"Force update requested by user {update.effective_user.id}")
+        await update.message.reply_text("🔄 Starting view count update...")
         
-        if not await is_admin(update.effective_user.id):
-            logger.warning(f"Non-admin user {update.effective_user.id} attempted force update")
-            await update.message.reply_text("❌ Only admins can use this command.")
-            return
-
-        if not await force_update_lock.acquire():
-            logger.warning("Force update attempted while another update was in progress")
-            await update.message.reply_text("⚠️ Another update is already in progress. Please wait.")
-            return
-
-        try:
-            await update.message.reply_text("🔄 Starting view count update...")
+        async with AsyncSessionLocal() as s:
+            # Get all unique reels
+            reels = (await s.execute(text("SELECT DISTINCT shortcode FROM reels"))).fetchall()
+            total_reels = len(reels)
             
-            async with AsyncSessionLocal() as s:
-                # Get all unique reels with their user info
-                reels = (await s.execute(text("""
-                    SELECT DISTINCT r.shortcode, r.user_id, u.username, a.insta_handle
-                    FROM reels r
-                    JOIN users u ON r.user_id = u.user_id
-                    LEFT JOIN allowed_accounts a ON r.user_id = a.user_id
-                """))).fetchall()
+            if total_reels == 0:
+                return await update.message.reply_text("No reels found to update.")
+            
+            await update.message.reply_text(f"Found {total_reels} reels to update. Processing in batches...")
+            
+            # Process in batches of 10
+            batch_size = 10
+            total_updated = 0
+            batch_count = 0
+            
+            for i in range(0, total_reels, batch_size):
+                batch = reels[i:i + batch_size]
+                batch_count += 1
                 
-                total_reels = len(reels)
-                
-                if total_reels == 0:
-                    return await update.message.reply_text("No reels found to update.")
-                
-                await update.message.reply_text(f"Found {total_reels} reels to update. Processing in batches...")
-                
-                # Process in batches of 10
-                batch_size = 10
-                total_updated = 0
-                batch_count = 0
-                update_logs = []
-                
-                for i in range(0, total_reels, batch_size):
-                    batch = reels[i:i + batch_size]
-                    batch_count += 1
-                    
-                    for shortcode, user_id, username, insta_handle in batch:
-                        try:
-                            # Get current view count from API
-                            logger.info(f"Fetching data for reel {shortcode}")
-                            reel_data = await get_reel_data(shortcode)
-                            new_views = reel_data['view_count']
-                            
+                for (shortcode,) in batch:
+                    try:
+                        # Get current view count from API
+                        reel_data = await get_reel_data(shortcode)
+                        new_views = reel_data['view_count']
+                        
+                        # Get the user who owns this reel
+                        user = (await s.execute(
+                            text("SELECT user_id FROM reels WHERE shortcode = :s"),
+                            {"s": shortcode}
+                        )).fetchone()
+                        
+                        if user:
+                            user_id = user[0]
                             # Get current total views
                             current = (await s.execute(
                                 text("SELECT total_views FROM users WHERE user_id = :u"),
@@ -1538,23 +1505,6 @@ async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     {"v": new_views, "u": user_id}
                                 )
                                 
-                                # Create update log entry
-                                update_log = {
-                                    "type": "view_update",
-                                    "timestamp": datetime.now().isoformat(),
-                                    "data": {
-                                        "shortcode": shortcode,
-                                        "user_id": user_id,
-                                        "username": username,
-                                        "insta_handle": insta_handle,
-                                        "old_views": current_views,
-                                        "new_views": new_views,
-                                        "reel_url": f"https://www.instagram.com/reel/{shortcode}/",
-                                        "api_response": reel_data
-                                    }
-                                }
-                                update_logs.append(update_log)
-                                
                                 # Log the view update
                                 await log_view_update(
                                     s, user_id, shortcode, 
@@ -1565,68 +1515,39 @@ async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 total_updated += 1
                                 logger.info(f"Updated views for user {user_id}: {current_views} -> {new_views}")
                     
-                        except Exception as e:
-                            logger.error(f"Error updating views for reel {shortcode}: {str(e)}")
-                            # Log the error
-                            error_log = {
-                                "type": "error",
-                                "timestamp": datetime.now().isoformat(),
-                                "data": {
-                                    "shortcode": shortcode,
-                                    "user_id": user_id,
-                                    "error": str(e)
-                                }
-                            }
-                            update_logs.append(error_log)
-                            continue
-                    
-                    # Commit after each batch
-                    await s.commit()
-                    
-                    # Send progress update every 5 batches
-                    if batch_count % 5 == 0:
-                        progress = min(i + batch_size, total_reels)
-                        await update.message.reply_text(
-                            f"🔄 Progress: {progress}/{total_reels} reels processed\n"
-                            f"✅ {total_updated} updates completed"
-                        )
-                    
-                    # Small delay between batches to prevent overload
-                    await asyncio.sleep(1)
+                    except Exception as e:
+                        logger.error(f"Error updating views for reel {shortcode}: {str(e)}")
+                        continue
                 
-                # Log the force update with all details
-                force_update_log = {
-                    "type": "force_update",
-                    "timestamp": datetime.now().isoformat(),
-                    "data": {
-                        "total_reels": total_reels,
-                        "successful_updates": total_updated,
-                        "update_logs": update_logs
-                    }
-                }
+                # Commit after each batch
+                await s.commit()
                 
-                # Send the complete log to the API
-                await log_force_update(s, total_reels, total_updated, force_update_log)
+                # Send progress update every 5 batches
+                if batch_count % 5 == 0:
+                    progress = min(i + batch_size, total_reels)
+                    await update.message.reply_text(
+                        f"🔄 Progress: {progress}/{total_reels} reels processed\n"
+                        f"✅ {total_updated} updates completed"
+                    )
                 
-                # Send detailed summary
-                summary = [
-                    f"✅ View count update completed!",
-                    f"• Total reels processed: {total_reels}",
-                    f"• Successful updates: {total_updated}",
-                    f"• Failed updates: {total_reels - total_updated}",
-                    "",
-                    "📊 Update logs have been sent to the API server"
-                ]
-                
-                await update.message.reply_text("\n".join(summary))
-                
-        finally:
-            force_update_lock.release()
-            logger.info("Force update lock released")
-
+                # Small delay between batches to prevent overload
+                await asyncio.sleep(1)
+            
+            # Log the force update
+            await log_force_update(s, total_reels, total_updated)
+            
+            await update.message.reply_text(
+                f"✅ View count update completed!\n"
+                f"• Total reels processed: {total_reels}\n"
+                f"• Successful updates: {total_updated}"
+            )
+            
     except Exception as e:
-        logger.error(f"Error in forceupdate command: {str(e)}")
-        await update.message.reply_text("❌ An error occurred during the force update.")
+        logger.error(f"Error in forceupdate: {str(e)}")
+        await update.message.reply_text(f"❌ Error updating views: {str(e)}")
+    finally:
+        # Always release the lock when done
+        force_update_lock.release()
 
 @debug_handler
 async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2736,74 +2657,44 @@ async def clearslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid slot number")
 
 async def run_bot():
-    """Run the bot"""
+    await init_db()
+    await ensure_config_table()
+    await migrate_allowed_accounts()
+    asyncio.create_task(start_health_check_server())
+    
+    app = ApplicationBuilder().token(TOKEN).build()
+    
+    handlers = [
+        ("start", start_cmd), ("addaccount", addaccount), ("removeaccount", removeaccount),
+        ("removeallaccs", removeallaccs), ("removeacc", removeacc),
+        ("submit", submit), ("remove", remove), ("cleardata", cleardata),
+        ("allstats", allstats), ("currentstats", currentstats), ("creatorstats", creatorstats),
+        ("broadcast", broadcast), ("export", export), ("addusdt", add_usdt),
+        ("addpaypal", add_paypal), ("addupi", add_upi), ("review", review),
+        ("forceupdate", forceupdate), ("addadmin", addadmin), ("removeadmin", removeadmin),
+        ("clearbad", clearbad), ("addslot", addslot), ("removeslot", removeslot),
+        ("slotstats", slotstats), ("slotdata", slotdata), ("clearslot", clearslot), ("lbpng", lbpng),
+        ("setmindate", setmindate), ("getmindate", getmindate),
+        ("referral", referral), ("referralstats", referralstats),
+        ("setcommission", setcommission), ("getcommission", getcommission),
+    ]
+    for cmd, h in handlers:
+        app.add_handler(CommandHandler(cmd, h))
+    
+    # Add callback query handler for review buttons
+    app.add_handler(CallbackQueryHandler(handle_review_callback))
+    
     try:
-        logger.info("Starting Reel Tracker Bot...")
-        logger.info("Initializing database...")
-        await init_db()
-        logger.info("Database initialized successfully")
-        
-        logger.info("Setting up bot handlers...")
-        app = ApplicationBuilder().token(TOKEN).build()
-        
-        # Add handlers
-        app.add_handler(CommandHandler("start", start_cmd))
-        app.add_handler(CommandHandler("addaccount", addaccount))
-        app.add_handler(CommandHandler("removeaccount", removeaccount))
-        app.add_handler(CommandHandler("removeallaccs", removeallaccs))
-        app.add_handler(CommandHandler("removeacc", removeacc))
-        app.add_handler(CommandHandler("submit", submit))
-        app.add_handler(CommandHandler("remove", remove))
-        app.add_handler(CommandHandler("cleardata", cleardata))
-        app.add_handler(CommandHandler("allstats", allstats))
-        app.add_handler(CommandHandler("currentstats", currentstats))
-        app.add_handler(CommandHandler("creatorstats", creatorstats))
-        app.add_handler(CommandHandler("broadcast", broadcast))
-        app.add_handler(CommandHandler("export", export))
-        app.add_handler(CommandHandler("addusdt", add_usdt))
-        app.add_handler(CommandHandler("addpaypal", add_paypal))
-        app.add_handler(CommandHandler("addupi", add_upi))
-        app.add_handler(CommandHandler("review", review))
-        app.add_handler(CommandHandler("forceupdate", forceupdate))
-        app.add_handler(CommandHandler("addadmin", addadmin))
-        app.add_handler(CommandHandler("removeadmin", removeadmin))
-        app.add_handler(CommandHandler("clearbad", clearbad))
-        app.add_handler(CommandHandler("addslot", addslot))
-        app.add_handler(CommandHandler("removeslot", removeslot))
-        app.add_handler(CommandHandler("slotstats", slotstats))
-        app.add_handler(CommandHandler("slotdata", slotdata))
-        app.add_handler(CommandHandler("clearslot", clearslot))
-        app.add_handler(CommandHandler("lbpng", lbpng))
-        app.add_handler(CommandHandler("setmindate", setmindate))
-        app.add_handler(CommandHandler("getmindate", getmindate))
-        app.add_handler(CommandHandler("referral", referral))
-        app.add_handler(CommandHandler("referralstats", referralstats))
-        app.add_handler(CommandHandler("setcommission", setcommission))
-        app.add_handler(CommandHandler("getcommission", getcommission))
-        
-        logger.info("All handlers set up successfully")
-        
-        # Start the bot
-        logger.info("Starting bot polling...")
         await app.initialize()
         await app.start()
-        logger.info("Bot is now running and ready to receive commands")
-        
-    except Exception as e:
-        logger.error(f"Error starting bot: {str(e)}")
-        raise
+        await app.updater.start_polling(drop_pending_updates=True)
+        await asyncio.Event().wait()
     finally:
-        logger.info("Shutting down bot...")
+        # Clean up resources
+        from api_client import api_client
+        await api_client.close()
         await app.stop()
         await app.shutdown()
-        logger.info("Bot shutdown complete")
 
 if __name__ == "__main__":
-    try:
-        logger.info("Starting Reel Tracker Bot application...")
-        asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {str(e)}")
-        sys.exit(1)
+    asyncio.run(run_bot())
