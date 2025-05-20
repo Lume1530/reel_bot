@@ -317,7 +317,7 @@ async def update_all_reel_views():
                     
                     if current:
                         current_views = current[0] or 0
-                        # Update total views
+                        # Override total views with new views instead of accumulating
                         await s.execute(
                             text("UPDATE users SET total_views = :v WHERE user_id = :u"),
                             {"v": new_views, "u": user_id}
@@ -621,7 +621,6 @@ async def removeacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import time
     from datetime import datetime
-    from logger import log_submission
     
     user_id = update.effective_user.id
     now = time.time()
@@ -722,7 +721,7 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await s.execute(text("INSERT INTO reels(user_id,shortcode) VALUES(:u,:c)"), {"u": uid, "c": code})
                 
                 # Log the submission
-                await log_submission(s, uid, code, reel_data['view_count'], reel_data['owner_username'])
+                logger.info(f"User {uid} submitted reel {code} with {reel_data['view_count']} views")
                 
                 results.append(f"✅ Added: {link}")
             except Exception as e:
@@ -1443,7 +1442,6 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
 @debug_handler
 async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Force update all reel views"""
-    from logger import log_view_update, log_force_update
     
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
@@ -1491,29 +1489,24 @@ async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         
                         if user:
                             user_id = user[0]
-                            # Get current total views
+                            
+                            # Get current views for logging purposes
                             current = (await s.execute(
                                 text("SELECT total_views FROM users WHERE user_id = :u"),
                                 {"u": user_id}
                             )).fetchone()
                             
-                            if current:
-                                current_views = current[0] or 0
-                                # Update total views
-                                await s.execute(
-                                    text("UPDATE users SET total_views = :v WHERE user_id = :u"),
-                                    {"v": new_views, "u": user_id}
-                                )
-                                
-                                # Log the view update
-                                await log_view_update(
-                                    s, user_id, shortcode, 
-                                    current_views, new_views,
-                                    reel_data['owner_username']
-                                )
-                                
-                                total_updated += 1
-                                logger.info(f"Updated views for user {user_id}: {current_views} -> {new_views}")
+                            current_views = current[0] or 0
+                            
+                            # Simply override the view count with the new value
+                            await s.execute(
+                                text("UPDATE users SET total_views = :v WHERE user_id = :u"),
+                                {"v": new_views, "u": user_id}
+                            )
+                            
+                            # Log the view update
+                            logger.info(f"Updated views for reel {shortcode}: {current_views} -> {new_views}")
+                            total_updated += 1
                     
                     except Exception as e:
                         logger.error(f"Error updating views for reel {shortcode}: {str(e)}")
@@ -1534,7 +1527,7 @@ async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(1)
             
             # Log the force update
-            await log_force_update(s, total_reels, total_updated)
+            logger.info(f"Force update completed: {total_updated}/{total_reels} successful updates")
             
             await update.message.reply_text(
                 f"✅ View count update completed!\n"
@@ -2690,9 +2683,9 @@ async def run_bot():
         await app.updater.start_polling(drop_pending_updates=True)
         await asyncio.Event().wait()
     finally:
-        # Clean up resources
-        from api_client import api_client
-        await api_client.close()
+        # Remove api_client cleanup
+        # from api_client import api_client
+        # await api_client.close()
         await app.stop()
         await app.shutdown()
 
