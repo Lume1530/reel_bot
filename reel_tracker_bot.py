@@ -139,29 +139,6 @@ async def init_db():
             ON CONFLICT (key) DO NOTHING
         """))
         
-        # Add logging tables
-        await conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS submission_logs (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                shortcode VARCHAR NOT NULL,
-                views BIGINT NOT NULL,
-                old_views BIGINT,
-                insta_handle VARCHAR NOT NULL,
-                action VARCHAR NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """))
-        
-        await conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS force_update_logs (
-                id SERIAL PRIMARY KEY,
-                total_reels INTEGER NOT NULL,
-                successful_updates INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """))
-        
         # Add initial admins from .env
         for admin_id in ADMIN_IDS:
             await conn.execute(text("""
@@ -621,8 +598,6 @@ async def removeacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import time
     from datetime import datetime
-    from logger import log_submission
-    
     user_id = update.effective_user.id
     now = time.time()
     
@@ -720,10 +695,6 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     results.append(f"⚠️ Already added: {link}")
                     continue
                 await s.execute(text("INSERT INTO reels(user_id,shortcode) VALUES(:u,:c)"), {"u": uid, "c": code})
-                
-                # Log the submission
-                await log_submission(s, uid, code, reel_data['view_count'], reel_data['owner_username'])
-                
                 results.append(f"✅ Added: {link}")
             except Exception as e:
                 results.append(f"❌ Error: {link} ({str(e)})")
@@ -1443,8 +1414,6 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
 @debug_handler
 async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Force update all reel views"""
-    from logger import log_view_update, log_force_update
-    
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
     
@@ -1504,14 +1473,6 @@ async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     text("UPDATE users SET total_views = :v WHERE user_id = :u"),
                                     {"v": new_views, "u": user_id}
                                 )
-                                
-                                # Log the view update
-                                await log_view_update(
-                                    s, user_id, shortcode, 
-                                    current_views, new_views,
-                                    reel_data['owner_username']
-                                )
-                                
                                 total_updated += 1
                                 logger.info(f"Updated views for user {user_id}: {current_views} -> {new_views}")
                     
@@ -1532,9 +1493,6 @@ async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # Small delay between batches to prevent overload
                 await asyncio.sleep(1)
-            
-            # Log the force update
-            await log_force_update(s, total_reels, total_updated)
             
             await update.message.reply_text(
                 f"✅ View count update completed!\n"
@@ -2661,6 +2619,7 @@ async def run_bot():
     await ensure_config_table()
     await migrate_allowed_accounts()
     asyncio.create_task(start_health_check_server())
+    asyncio.create_task(start_daily_updates())
     
     app = ApplicationBuilder().token(TOKEN).build()
     
@@ -2684,17 +2643,9 @@ async def run_bot():
     # Add callback query handler for review buttons
     app.add_handler(CallbackQueryHandler(handle_review_callback))
     
-    try:
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
-        await asyncio.Event().wait()
-    finally:
-        # Clean up resources
-        from api_client import api_client
-        await api_client.close()
-        await app.stop()
-        await app.shutdown()
+    await app.initialize(); await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(run_bot())
