@@ -2633,3 +2633,81 @@ async def run_bot():
 
 if __name__ == "__main__":
     asyncio.run(run_bot())
+
+
+
+@debug_handler
+async def banuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    if len(context.args) != 1:
+        return await update.message.reply_text("Usage: /banuser <user_id>")
+    uid = int(context.args[0])
+    async with AsyncSessionLocal() as s:
+        await s.execute(text("DELETE FROM allowed_accounts WHERE user_id = :u"), {"u": uid})
+        await s.execute(text("DELETE FROM reels WHERE user_id = :u"), {"u": uid})
+        await s.execute(text("DELETE FROM users WHERE user_id = :u"), {"u": uid})
+        await s.execute(text("INSERT INTO banned_users (user_id) VALUES (:u) ON CONFLICT DO NOTHING"), {"u": uid})
+        await s.commit()
+    await update.message.reply_text(f"🔒 User {uid} has been banned and data removed.")
+
+@debug_handler
+async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    if len(context.args) != 1:
+        return await update.message.reply_text("Usage: /unban <user_id>")
+    uid = int(context.args[0])
+    async with AsyncSessionLocal() as s:
+        await s.execute(text("DELETE FROM banned_users WHERE user_id = :u"), {"u": uid})
+        await s.commit()
+    await update.message.reply_text(f"✅ User {uid} has been unbanned.")
+
+@debug_handler
+async def addviews_custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    if len(context.args) != 2:
+        return await update.message.reply_text("Usage: /addviews <user_id> <views>")
+    uid, views = map(int, context.args)
+    async with AsyncSessionLocal() as s:
+        await s.execute(
+            text("UPDATE users SET total_views = COALESCE(total_views, 0) + :v WHERE user_id = :u"),
+            {"v": views, "u": uid}
+        )
+        await s.commit()
+    await update.message.reply_text(f"✅ Added {views} views to user {uid}")
+
+@debug_handler
+async def currentaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    async with AsyncSessionLocal() as s:
+        rows = await s.execute(text("SELECT DISTINCT insta_handle FROM allowed_accounts ORDER BY insta_handle"))
+        handles = [r[0] for r in rows.fetchall()]
+    msg = "📱 Active Instagram Accounts:
+" + "\n".join(f"• @{h}" for h in handles) if handles else "No active accounts."
+    await update.message.reply_text(msg)
+
+@debug_handler
+async def userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    if len(context.args) != 1:
+        return await update.message.reply_text("Usage: /userstats <user_id>")
+    uid = int(context.args[0])
+    async with AsyncSessionLocal() as s:
+        links = await s.execute(text("SELECT shortcode FROM reels WHERE user_id = :u"), {"u": uid})
+        handles = await s.execute(text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :u"), {"u": uid})
+        link_list = [r[0] for r in links.fetchall()]
+        handle_list = [r[0] for r in handles.fetchall()]
+    msg = [
+        f"📊 <b>User Stats for {uid}</b>",
+        "• Accounts: " + ", ".join(f"@{h}" for h in handle_list) if handle_list else "• No accounts",
+        "• Submitted Reels:"
+    ]
+    if link_list:
+        msg += [f"  - https://www.instagram.com/reel/{c}/" for c in link_list]
+    else:
+        msg.append("  - No reels submitted.")
+    await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
