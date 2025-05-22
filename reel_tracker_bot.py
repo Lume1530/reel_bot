@@ -60,6 +60,11 @@ AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=F
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await conn.execute(text(\"""
+        CREATE TABLE IF NOT EXISTS banned_users (
+            user_id BIGINT PRIMARY KEY
+        )
+    \"""))
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS total_views BIGINT DEFAULT 0"
         ))
@@ -366,6 +371,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if await is_admin(update.effective_user.id):
         cmds += [
+"• <code>/banuser &lt;user_id&gt;</code> - Ban a user and delete all data",
+        "• <code>/unban &lt;user_id&gt;</code> - Unban a user",
+        "• <code>/addviews &lt;user_id&gt; &lt;views&gt;</code> - Add views manually",
+        "• <code>/currentaccounts</code> - List all IG accounts",
+        "• <code>/userstats &lt;user_id&gt;</code> - View user's reels",
 "• <code>/banuser &lt;user_id&gt;</code> - Ban a user and delete all data",
         "• <code>/unban &lt;user_id&gt;</code> - Unban a user",
         "• <code>/addviews &lt;user_id&gt; &lt;views&gt;</code> - Add views manually",
@@ -2603,6 +2613,14 @@ async def run_bot():
     asyncio.create_task(start_health_check_server())
     
     app = ApplicationBuilder().token(TOKEN).build()
+
+app.add_handler(CommandHandler("start", start_cmd))
+app.add_handler(CommandHandler("help", help_cmd))
+app.add_handler(CommandHandler("banuser", banuser))
+app.add_handler(CommandHandler("unban", unban))
+app.add_handler(CommandHandler("addviews", addviews_custom))
+app.add_handler(CommandHandler("currentaccounts", currentaccounts))
+app.add_handler(CommandHandler("userstats", userstats))
     
     handlers = [
         ("start", start_cmd), ("addaccount", addaccount), ("removeaccount", removeaccount),
