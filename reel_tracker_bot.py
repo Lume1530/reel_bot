@@ -2617,7 +2617,7 @@ async def run_bot():
     app = ApplicationBuilder().token(TOKEN).build()
     
     handlers = [
-        ("start", start_cmd), ("addaccount", addaccount), ("help", help_cmd), ("banuser", banuser), ("removeaccount", removeaccount),
+        ("start", start_cmd), ("addaccount", addaccount), ("banuser", banuser), ("removeaccount", removeaccount),
         ("removeallaccs", removeallaccs), ("removeacc", removeacc), ("addviews", addviews_custom),
         ("submit", submit), ("remove", remove), ("cleardata", cleardata), ("unban", unban),
         ("allstats", allstats), ("currentstats", currentstats), ("creatorstats", creatorstats),
