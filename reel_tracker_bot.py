@@ -362,23 +362,36 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/addusdt &lt;address&gt;</code> - Add your USDT ERC20 address",
         "• <code>/addpaypal &lt;email&gt;</code> - Add your PayPal email",
         "• <code>/addupi &lt;address&gt;</code> - Add your UPI address",
+        "• <code>/removeusdt</code> - Remove your USDT address",
+        "• <code>/removepaypal</code> - Remove your PayPal email",
+        "• <code>/removeupi</code> - Remove your UPI address",
     ]
     
     if await is_admin(update.effective_user.id):
         cmds += [
             "",
             "👑 <b>Admin Commands:</b>",
+            "",
+            "👥 <b>Account Management:</b>",
             "• <code>/review &lt;user_id&gt;</code> - Review account link requests",
             "• <code>/removeaccount &lt;user_id&gt;</code> - Unlink an IG account",
             "• <code>/removeallaccs &lt;user_id&gt;</code> - Remove all accounts for a user",
             "• <code>/removeacc &lt;user_id&gt; &lt;@handle&gt;</code> - Remove specific account",
+            "• <code>/currentaccounts</code> - Show list of all active Instagram accounts",
+            "",
+            "📊 <b>Statistics & Reports:</b>",
             "• <code>/allstats</code> - Lists stats for all creators with payment info",
             "• <code>/currentstats</code> - Show total views and working accounts",
-            "• <code>/broadcast &lt;message&gt;</code> - Send message to all users",
-            "• <code>/cleardata</code> - Clear all reel links",
             "• <code>/export</code> - Export stats.txt for all users",
+            "• <code>/lbpng</code> - Generate leaderboard image",
+            "",
+            "📱 <b>View Management:</b>",
             "• <code>/forceupdate</code> - Force update all reel views",
+            "• <code>/addviews &lt;user_id&gt; &lt;views&gt;</code> - Set total views for a user",
             "• <code>/clearbad</code> - Remove submissions with less than 10k views after 7 days",
+            "• <code>/cleardata</code> - Clear all reel links",
+            "",
+            "📅 <b>Date Settings:</b>",
             "• <code>/setmindate &lt;YYYY-MM-DD&gt;</code> - Set minimum allowed video upload date",
             "• <code>/getmindate</code> - Show current minimum allowed video date",
             "",
@@ -387,14 +400,18 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/removeslot &lt;1|2&gt; &lt;handle&gt;</code> - Remove handle from slot",
             "• <code>/slotstats</code> - Show current handles and submissions in slots",
             "• <code>/slotdata &lt;1|2&gt;</code> - Show and clear slot submissions",
+            "• <code>/exportslot &lt;1|2&gt;</code> - Export and clear slot submissions",
+            "",
+            "👥 <b>Admin Control:</b>",
             "• <code>/addadmin &lt;user_id&gt;</code> - Add new admin",
             "• <code>/removeadmin &lt;user_id&gt;</code> - Remove admin",
+            "• <code>/broadcast &lt;message&gt;</code> - Send message to all users",
             "",
-            "👥 <b>Referral Management:</b>",
+            "👥 <b>Referral System:</b>",
             "• <code>/referral &lt;user_id&gt; &lt;referrer_id&gt;</code> - Assign referral relationship",
             "• <code>/referralstats</code> - View referral statistics for all users",
             "• <code>/setcommission &lt;rate&gt;</code> - Set global commission rate",
-            "• <code>/getcommission</code> - View current commission rate",
+            "• <code>/getcommission</code> - View current commission rate"
         ]
     await update.message.reply_text("\n".join(cmds), parse_mode=ParseMode.HTML)
 
@@ -755,29 +772,47 @@ async def cleardata(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def addviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add views to a user's total"""
+    """Set total views for a user (overwrites existing views)"""
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
     
-    if len(context.args) != 1:
-        return await update.message.reply_text("Usage: /addviews <user_id>")
+    if len(context.args) != 2:
+        return await update.message.reply_text(
+            "Usage: /addviews <user_id> <views>\n"
+            "Example: /addviews 123456789 50000\n"
+            "This will set the user's total views to the specified amount."
+        )
     
     try:
         user_id = int(context.args[0])
-        views_to_add = 10000  # Fixed amount of views to add
+        views = int(context.args[1])
+        
+        if views < 0:
+            return await update.message.reply_text("❌ Views cannot be negative")
         
         async with AsyncSessionLocal() as s:
-            exists = (await s.execute(text("SELECT 1 FROM users WHERE user_id=:u"), {"u": user_id})).scalar()
-            if exists:
+            # Check if user exists
+            exists = await s.execute(
+                text("SELECT total_views FROM users WHERE user_id = :u"),
+                {"u": user_id}
+            )
+            result = exists.fetchone()
+            
+            if result:
+                current_views = result[0] or 0
+                # Overwrite the views
                 await s.execute(
-                    text("UPDATE users SET total_views=total_views+:v WHERE user_id=:u"),
-                    {"v": views_to_add, "u": user_id}
+                    text("UPDATE users SET total_views = :v WHERE user_id = :u"),
+                    {"v": views, "u": user_id}
                 )
             else:
+                # Create new user with specified views
                 await s.execute(
-                    text("INSERT INTO users(user_id,username,total_views) VALUES(:u,NULL,:v)"),
-                    {"u": user_id, "v": views_to_add}
+                    text("INSERT INTO users (user_id, total_views) VALUES (:u, :v)"),
+                    {"u": user_id, "v": views}
                 )
+                current_views = 0
+            
             await s.commit()
             
             # Get username for confirmation
@@ -787,10 +822,18 @@ async def addviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 user_name = str(user_id)
             
-            await update.message.reply_text(f"✅ Added {views_to_add:,} views to @{user_name}")
+            # Build response message
+            msg = [
+                f"✅ Updated views for @{user_name}",
+                f"• Previous views: {current_views:,}",
+                f"• New views: {views:,}",
+                f"• Change: {views - current_views:+,}"
+            ]
+            
+            await update.message.reply_text("\n".join(msg))
             
     except ValueError:
-        await update.message.reply_text("❌ Invalid user ID")
+        await update.message.reply_text("❌ Invalid user ID or view count. Both must be numbers.")
 
 @debug_handler
 async def removeviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -867,17 +910,53 @@ async def allstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 full_name = str(user_id)
             
+            # Get all Instagram handles and their individual stats
+            handles = []
+            total_account_views = 0
+            
+            # Get all linked accounts
+            accounts = await s.execute(
+                text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :u"),
+                {"u": user_id}
+            )
+            accounts = [r[0] for r in accounts.fetchall()]
+            
+            # Get stats for each account
+            for handle in accounts:
+                # Get reels for this handle
+                reels = await s.execute(text("""
+                    SELECT r.shortcode 
+                    FROM reels r 
+                    WHERE r.user_id = :u
+                """), {"u": user_id})
+                
+                handle_views = 0
+                handle_reels = 0
+                
+                for (shortcode,) in reels.fetchall():
+                    try:
+                        reel_data = await get_reel_data(shortcode)
+                        if reel_data['owner_username'].lower() == handle.lower():
+                            handle_views += reel_data['view_count']
+                            handle_reels += 1
+                    except Exception as e:
+                        logger.error(f"Error getting views for reel {shortcode}: {e}")
+                
+                total_account_views += handle_views
+                handles.append({
+                    'handle': handle,
+                    'views': handle_views,
+                    'reels': handle_reels
+                })
+            
+            # Sort handles by views
+            handles.sort(key=lambda x: x['views'], reverse=True)
+            
             # Get total videos count
             total_videos = (await s.execute(
                 text("SELECT COUNT(*) FROM reels WHERE user_id = :u"),
                 {"u": user_id}
             )).scalar() or 0
-            
-            # Get all Instagram handles
-            handles = [r[0] for r in (await s.execute(
-                text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :u"),
-                {"u": user_id}
-            )).fetchall()]
             
             msg = [
                 f"👤 <b>Telegram Username:</b> {full_name}",
@@ -885,18 +964,22 @@ async def allstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎥 <b>Total Videos:</b> {total_videos}",
                 f"👥 <b>Total Accounts:</b> {len(handles)}",
                 "",
-                "📱 <b>Account Names:</b>"
+                "📱 <b>Account Statistics:</b>"
             ]
             
-            # Add account names
-            if handles:
-                msg.extend([f"• @{h}" for h in handles])
-            else:
-                msg.append("• No accounts")
+            # Add individual account stats
+            for account in handles:
+                account_payable = (account['views'] / 1000) * 0.025
+                msg.extend([
+                    f"• @{account['handle']}",
+                    f"  ↳ Views: {account['views']:,}",
+                    f"  ↳ Reels: {account['reels']}",
+                    f"  ↳ Payable: ${account_payable:,.2f}"
+                ])
             
             msg.extend([
                 "",
-                f"💰 <b>Payable Amount:</b> ${payable_amount:,.2f}",
+                f"💰 <b>Total Payable Amount:</b> ${payable_amount:,.2f}",
                 "━━━━━━━━━━━━━━━━━━━━"
             ])
             
@@ -905,6 +988,9 @@ async def allstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "\n".join(msg),
                 parse_mode=ParseMode.HTML
             )
+            
+            # Add a small delay between messages to prevent flooding
+            await asyncio.sleep(0.5)
 
 @debug_handler
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1659,7 +1745,7 @@ async def clearbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def addslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add Instagram handles to a slot"""
+    """Add Instagram handles to a slot and assign existing reels"""
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
     
@@ -1675,7 +1761,7 @@ async def addslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if slot_number not in [1, 2]:
             return await update.message.reply_text("❌ Slot number must be 1 or 2")
         
-        handles = [h.lstrip('@') for h in context.args[1:]]
+        handles = [h.lstrip('@').lower() for h in context.args[1:]]
         
         async with AsyncSessionLocal() as s:
             # Get current handles in the slot
@@ -1683,7 +1769,7 @@ async def addslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text("SELECT insta_handle FROM slot_accounts WHERE slot_number = :s"),
                 {"s": slot_number}
             )
-            current_handles = [h[0] for h in current_handles.fetchall()]
+            current_handles = [h[0].lower() for h in current_handles.fetchall()]
             
             # Remove existing handles for this slot
             await s.execute(
@@ -1700,6 +1786,46 @@ async def addslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     """),
                     {"s": slot_number, "h": handle}
                 )
+            
+            # Find existing reels for these handles that aren't in slot_submissions
+            reels_added = 0
+            total_views = 0
+            
+            # Get all reels from the database
+            existing_reels = await s.execute(text("""
+                SELECT r.shortcode, r.user_id, r.created_at
+                FROM reels r
+                WHERE r.shortcode NOT IN (
+                    SELECT shortcode FROM slot_submissions
+                )
+            """))
+            
+            for shortcode, user_id, created_at in existing_reels.fetchall():
+                try:
+                    # Get reel data from API
+                    reel_data = await get_reel_data(shortcode)
+                    reel_handle = reel_data['owner_username'].lower()
+                    
+                    # Check if this handle is in our new slot
+                    if reel_handle in handles:
+                        # Add to slot_submissions
+                        await s.execute(text("""
+                            INSERT INTO slot_submissions 
+                            (slot_number, shortcode, insta_handle, submitted_at, view_count)
+                            VALUES (:s, :c, :h, :t, :v)
+                        """), {
+                            "s": slot_number,
+                            "c": shortcode,
+                            "h": reel_handle,
+                            "t": created_at or datetime.now(),
+                            "v": reel_data['view_count']
+                        })
+                        reels_added += 1
+                        total_views += reel_data['view_count']
+                        
+                except Exception as e:
+                    logger.error(f"Error processing reel {shortcode}: {e}")
+                    continue
             
             await s.commit()
             
@@ -1718,7 +1844,11 @@ async def addslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg.extend([
                 "",
                 "📥 <b>New Handles:</b>",
-                *[f"• @{h}" for h in handles]
+                *[f"• @{h}" for h in handles],
+                "",
+                "📊 <b>Existing Reels Added:</b>",
+                f"• Reels: {reels_added}",
+                f"• Total Views: {total_views:,}"
             ])
             
             await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
@@ -2591,6 +2721,213 @@ async def clearslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Invalid slot number")
 
+@debug_handler
+async def exportslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Export all links from a slot to a text file and clear the slot"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "Usage: /exportslot <slot_number>\n"
+            "Example: /exportslot 1\n"
+            "This will export all links from the specified slot and clear it."
+        )
+    
+    try:
+        slot_number = int(context.args[0])
+        if slot_number not in [1, 2]:
+            return await update.message.reply_text("❌ Slot number must be 1 or 2")
+        
+        async with AsyncSessionLocal() as s:
+            # Get all submissions for this slot
+            submissions = await s.execute(
+                text("""
+                    SELECT shortcode, insta_handle, view_count, submitted_at
+                    FROM slot_submissions
+                    WHERE slot_number = :s
+                    ORDER BY submitted_at DESC
+                """),
+                {"s": slot_number}
+            )
+            submissions_data = submissions.fetchall()
+            
+            if not submissions_data:
+                return await update.message.reply_text(f"ℹ️ No submissions found in slot {slot_number}")
+            
+            # Prepare export data
+            export_lines = [f"📊 Slot {slot_number} Export - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
+            export_lines.append("=" * 50)
+            
+            total_views = 0
+            total_videos = len(submissions_data)
+            
+            for shortcode, handle, views, submitted_at in submissions_data:
+                views = views or 0
+                total_views += views
+                export_lines.append(f"Instagram: @{handle}")
+                export_lines.append(f"Link: https://www.instagram.com/reel/{shortcode}/")
+                export_lines.append(f"Views: {views:,}")
+                export_lines.append(f"Submitted: {submitted_at.strftime('%Y-%m-%d %H:%M:%S')}")
+                export_lines.append("-" * 30)
+            
+            export_lines.append(f"\nTotal Videos: {total_videos}")
+            export_lines.append(f"Total Views: {total_views:,}")
+            
+            # Create file buffer
+            import io
+            file_buffer = io.BytesIO("\n".join(export_lines).encode())
+            file_buffer.name = f"slot_{slot_number}_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            
+            # Clear the slot submissions
+            await s.execute(
+                text("DELETE FROM slot_submissions WHERE slot_number = :s"),
+                {"s": slot_number}
+            )
+            await s.commit()
+            
+            # Send the export file
+            await update.message.reply_document(
+                document=file_buffer,
+                caption=f"✅ Exported and cleared Slot {slot_number}\n"
+                        f"📊 Summary:\n"
+                        f"• Total Videos: {total_videos}\n"
+                        f"• Total Views: {total_views:,}\n"
+                        f"The slot is now ready for new submissions."
+            )
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid slot number")
+
+@debug_handler
+async def currentaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show list of all active Instagram accounts and their statistics"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    
+    async with AsyncSessionLocal() as s:
+        # Get all linked accounts
+        accounts = await s.execute(text("""
+            SELECT 
+                a.insta_handle,
+                u.user_id,
+                u.username
+            FROM allowed_accounts a
+            JOIN users u ON a.user_id = u.user_id
+            ORDER BY a.insta_handle
+        """))
+        accounts = accounts.fetchall()
+        
+        if not accounts:
+            return await update.message.reply_text("No Instagram accounts are currently linked.")
+        
+        # Process each account
+        account_stats = []
+        total_accounts = len(accounts)
+        total_reels = 0
+        total_views = 0
+        
+        for handle, user_id, username in accounts:
+            # Get reels for this account
+            reels = await s.execute(text("""
+                SELECT r.shortcode 
+                FROM reels r 
+                WHERE r.user_id = :u
+            """), {"u": user_id})
+            
+            handle_views = 0
+            handle_reels = 0
+            latest_reel_date = None
+            
+            for (shortcode,) in reels.fetchall():
+                try:
+                    reel_data = await get_reel_data(shortcode)
+                    if reel_data['owner_username'].lower() == handle.lower():
+                        handle_views += reel_data['view_count']
+                        handle_reels += 1
+                        
+                        # Track latest reel date if available
+                        if 'taken_at_timestamp' in reel_data:
+                            reel_date = datetime.fromtimestamp(reel_data['taken_at_timestamp'])
+                            if not latest_reel_date or reel_date > latest_reel_date:
+                                latest_reel_date = reel_date
+                except Exception as e:
+                    logger.error(f"Error getting views for reel {shortcode}: {e}")
+            
+            # Try to get Telegram username
+            try:
+                chat = await context.bot.get_chat(user_id)
+                tg_username = chat.username or str(user_id)
+            except:
+                tg_username = str(user_id)
+            
+            account_stats.append({
+                'handle': handle,
+                'views': handle_views,
+                'reels': handle_reels,
+                'tg_username': tg_username,
+                'latest_reel': latest_reel_date
+            })
+            
+            total_reels += handle_reels
+            total_views += handle_views
+        
+        # Sort accounts by views (highest to lowest)
+        account_stats.sort(key=lambda x: x['views'], reverse=True)
+        
+        # Build the message
+        msg = [
+            "📊 <b>Current Active Accounts</b>",
+            f"• Total Accounts: {total_accounts}",
+            f"• Total Reels: {total_reels}",
+            f"• Total Views: {total_views:,}",
+            "",
+            "📱 <b>Account Details:</b>"
+        ]
+        
+        # Add stats for each account
+        for i, acc in enumerate(account_stats, 1):
+            latest = acc['latest_reel'].strftime("%Y-%m-%d %H:%M") if acc['latest_reel'] else "No reels"
+            payable = (acc['views'] / 1000) * 0.025
+            
+            msg.extend([
+                f"\n{i}. <b>@{acc['handle']}</b>",
+                f"   ↳ Telegram: @{acc['tg_username']}",
+                f"   ↳ Views: {acc['views']:,}",
+                f"   ↳ Reels: {acc['reels']}",
+                f"   ↳ Latest Reel: {latest}",
+                f"   ↳ Payable: ${payable:,.2f}"
+            ])
+        
+        # Split message if too long
+        max_length = 4096  # Telegram's message length limit
+        current_msg = []
+        current_length = 0
+        
+        for line in msg:
+            line_length = len(line) + 1  # +1 for newline
+            if current_length + line_length > max_length:
+                # Send current chunk
+                await context.bot.send_message(
+                    update.effective_chat.id,
+                    "\n".join(current_msg),
+                    parse_mode=ParseMode.HTML
+                )
+                current_msg = []
+                current_length = 0
+                await asyncio.sleep(0.5)  # Small delay between messages
+            
+            current_msg.append(line)
+            current_length += line_length
+        
+        # Send remaining lines
+        if current_msg:
+            await context.bot.send_message(
+                update.effective_chat.id,
+                "\n".join(current_msg),
+                parse_mode=ParseMode.HTML
+            )
+
 async def run_bot():
     await init_db()
     await ensure_config_table()
@@ -2612,6 +2949,7 @@ async def run_bot():
         ("setmindate", setmindate), ("getmindate", getmindate),
         ("referral", referral), ("referralstats", referralstats),
         ("setcommission", setcommission), ("getcommission", getcommission),
+        ("exportslot", exportslot), ("currentaccounts", currentaccounts),
     ]
     for cmd, h in handlers:
         app.add_handler(CommandHandler(cmd, h))
