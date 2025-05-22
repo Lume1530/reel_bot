@@ -61,10 +61,10 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS banned_users (
-            user_id BIGINT PRIMARY KEY
-        )
-    """))
+    CREATE TABLE IF NOT EXISTS banned_users (
+        user_id BIGINT PRIMARY KEY
+    )
+"""))
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS total_views BIGINT DEFAULT 0"
         ))
