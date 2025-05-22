@@ -58,13 +58,15 @@ engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 async def init_db():
+    engine = create_async_engine(DATABASE_URL, echo=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    await conn.execute(text("""
-    CREATE TABLE IF NOT EXISTS banned_users (
-        user_id BIGINT PRIMARY KEY
-    )
-"""))
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS banned_users (
+                user_id BIGINT PRIMARY KEY
+            )
+        """))
+
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS total_views BIGINT DEFAULT 0"
         ))
