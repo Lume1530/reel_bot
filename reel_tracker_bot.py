@@ -366,6 +366,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if await is_admin(update.effective_user.id):
         cmds += [
+"• <code>/banuser &lt;user_id&gt;</code> - Ban a user and delete all data",
+        "• <code>/unban &lt;user_id&gt;</code> - Unban a user",
+        "• <code>/addviews &lt;user_id&gt; &lt;views&gt;</code> - Add views manually",
+        "• <code>/currentaccounts</code> - List all IG accounts",
+        "• <code>/userstats &lt;user_id&gt;</code> - View user's reels",
             "",
             "👑 <b>Admin Commands:</b>",
             "• <code>/review &lt;user_id&gt;</code> - Review account link requests",
