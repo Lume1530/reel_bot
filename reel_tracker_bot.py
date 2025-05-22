@@ -3,8 +3,6 @@ import re
 import asyncio
 import logging
 import requests
-from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
 import io
@@ -186,13 +184,6 @@ class User(Base):
     registered  = Column(Integer, default=0)
     total_views = Column(BigInteger, default=0)
 
-
-# Setup a reusable requests session with retries
-session = requests.Session()
-retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
-session.mount('https://', HTTPAdapter(max_retries=retries))
-
-
 # ─── Utilities ─────────────────────────────────────────────────────────────────
 async def is_admin(user_id: int) -> bool:
     async with AsyncSessionLocal() as s:
@@ -256,7 +247,7 @@ async def get_reel_data(shortcode: str) -> dict:
             'token': ENSEMBLE_TOKEN
         }
         
-        response = session.get(api_url, params=params)
+        response = requests.get(api_url, params=params)
         response.raise_for_status()
         
         data = response.json()
