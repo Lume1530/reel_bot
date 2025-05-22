@@ -2615,22 +2615,14 @@ async def run_bot():
     asyncio.create_task(start_health_check_server())
     
     app = ApplicationBuilder().token(TOKEN).build()
-
-app.add_handler(CommandHandler("start", start_cmd))
-app.add_handler(CommandHandler("help", help_cmd))
-app.add_handler(CommandHandler("banuser", banuser))
-app.add_handler(CommandHandler("unban", unban))
-app.add_handler(CommandHandler("addviews", addviews_custom))
-app.add_handler(CommandHandler("currentaccounts", currentaccounts))
-app.add_handler(CommandHandler("userstats", userstats))
     
     handlers = [
-        ("start", start_cmd), ("addaccount", addaccount), ("removeaccount", removeaccount),
-        ("removeallaccs", removeallaccs), ("removeacc", removeacc),
-        ("submit", submit), ("remove", remove), ("cleardata", cleardata),
+        ("start", start_cmd), ("addaccount", addaccount), ("help", help_cmd), ("banuser", banuser) ("removeaccount", removeaccount),
+        ("removeallaccs", removeallaccs), ("removeacc", removeacc), ("addviews", addviews_custom),
+        ("submit", submit), ("remove", remove), ("cleardata", cleardata), ("unban", unban),
         ("allstats", allstats), ("currentstats", currentstats), ("creatorstats", creatorstats),
-        ("broadcast", broadcast), ("export", export), ("addusdt", add_usdt),
-        ("addpaypal", add_paypal), ("addupi", add_upi), ("review", review),
+        ("broadcast", broadcast), ("export", export), ("addusdt", add_usdt), ("currentaccounts", currentaccounts),
+        ("addpaypal", add_paypal), ("addupi", add_upi), ("review", review), ("userstats", userstats),
         ("forceupdate", forceupdate), ("addadmin", addadmin), ("removeadmin", removeadmin),
         ("clearbad", clearbad), ("addslot", addslot), ("removeslot", removeslot),
         ("slotstats", slotstats), ("slotdata", slotdata), ("clearslot", clearslot), ("lbpng", lbpng),
