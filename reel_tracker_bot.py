@@ -896,14 +896,7 @@ async def send_userstats_page(source, context, page):
         if not users:
             return await source.message.reply_text("ℹ️ No user stats available.")
         paged_users, total_pages = paginate_list(users, page, page_size)
-
-if not paged_users:
-    return await source.message.reply_text(
-        f"❌ Page {page} is empty. Only {total_pages} page(s) available.",
-        parse_mode=ParseMode.HTML
-    )
-
-user_id, username, views, usdt, paypal, upi = paged_users[0]
+        user_id, username, views, usdt, paypal, upi = paged_users[0]
 
         total_videos = (await s.execute(
             text("SELECT COUNT(*) FROM reels WHERE user_id = :u"),
