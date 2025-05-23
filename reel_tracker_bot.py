@@ -329,24 +329,6 @@ async def update_all_reel_views():
         await s.commit()
         logger.info(f"✅ Completed view updates for {total_updated} users")
 
-async def start_daily_updates():
-    """Start the daily view update task"""
-    while True:
-        try:
-            # Wait until next day at midnight
-            now = datetime.now()
-            next_run = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            wait_seconds = (next_run - now).total_seconds()
-            
-            logger.info(f"Next view update scheduled in {wait_seconds/3600:.1f} hours")
-            await asyncio.sleep(wait_seconds)
-            
-            # Run the update
-            await update_all_reel_views()
-            
-        except Exception as e:
-            logger.error(f"Error in daily update task: {str(e)}")
-            await asyncio.sleep(3600)  # Wait an hour before retrying
 
 # Global dict for submit cooldowns
 submit_cooldowns = {}
