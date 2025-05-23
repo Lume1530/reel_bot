@@ -2783,7 +2783,7 @@ async def run_bot():
         ("banuser", banuser), 
         ("unban", unban),
         ("removeallaccs", removeallaccs), 
-        ("removeacc", removeaccount), 
+        ("removeacc", removeacc), 
         ("addviews", addviews_custom),
         ("submit", submit), 
         ("remove", remove), 
