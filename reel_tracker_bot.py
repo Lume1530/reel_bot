@@ -281,10 +281,12 @@ async def get_reel_data(shortcode: str) -> dict:
         logger.info(f"Extracted view_count: {view_count}")
         
         return {
-            'owner_username': reel_data.get('owner', {}).get('username', ''),
-            'view_count': view_count,
-            'play_count': view_count  # Use same count for play_count
-        }
+    'owner_username': reel_data.get('owner', {}).get('username', ''),
+    'view_count': view_count,
+    'play_count': view_count,
+    'taken_at_timestamp': reel_data.get('taken_at_timestamp') or reel_data.get('taken_at') or reel_data.get('timestamp')
+}
+
                 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 422:
