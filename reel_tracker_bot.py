@@ -378,7 +378,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/addviews &lt;user_id&gt; &lt;views&gt;</code> - Add views manually",
         "• <code>/currentaccounts</code> - List all IG accounts",
         "• <code>/userstats &lt;user_id&gt;</code> - View user's reels",
-"• <code>/banuser &lt;user_id&gt;</code> - Ban a user and delete all data",
+        "• <code>/banuser &lt;user_id&gt;</code> - Ban a user and delete all data",
         "• <code>/unban &lt;user_id&gt;</code> - Unban a user",
         "• <code>/addviews &lt;user_id&gt; &lt;views&gt;</code> - Add views manually",
         "• <code>/currentaccounts</code> - List all IG accounts",
@@ -2564,6 +2564,27 @@ async def slotdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except ValueError:
         await update.message.reply_text("❌ Invalid slot number")
+
+@debug_handler
+async def banuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+
+    if len(context.args) != 1:
+        return await update.message.reply_text("Usage: /banuser <user_id>")
+
+    try:
+        user_id = int(context.args[0])
+        async with AsyncSessionLocal() as s:
+            await s.execute(text("DELETE FROM users WHERE user_id = :u"), {"u": user_id})
+            await s.execute(text("DELETE FROM reels WHERE user_id = :u"), {"u": user_id})
+            await s.execute(text("DELETE FROM allowed_accounts WHERE user_id = :u"), {"u": user_id})
+            await s.execute(text("DELETE FROM payment_details WHERE user_id = :u"), {"u": user_id})
+            await s.execute(text("INSERT INTO banned_users (user_id) VALUES (:u) ON CONFLICT DO NOTHING"), {"u": user_id})
+            await s.commit()
+        await update.message.reply_text(f"🚫 Banned user {user_id} and removed all their data.")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
 
 @debug_handler
 async def clearslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
