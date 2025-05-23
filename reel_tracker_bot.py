@@ -362,7 +362,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/currentaccounts</code> - List all IG accounts",
             "• <code>/userstats &lt;user_id&gt;</code> - View user's reels",
             "• <code>/review &lt;user_id&gt;</code> - Review account link requests",
-            "• <code>/removeaccount &lt;user_id&gt;</code> - Unlink an IG account",
             "• <code>/removeallaccs &lt;user_id&gt;</code> - Remove all accounts for a user",
             "• <code>/removeacc &lt;user_id&gt; &lt;@handle&gt;</code> - Remove specific account",
             "• <code>/allstats</code> - Lists stats for all creators with payment info",
@@ -584,17 +583,6 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Invalid user ID")
 
-@debug_handler
-async def removeaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id):
-        return await update.message.reply_text("🚫 Unauthorized")
-    if len(context.args) != 1:
-        return await update.message.reply_text("Usage: /removeaccount <user_id>")
-    uid = int(context.args[0])
-    async with AsyncSessionLocal() as s:
-        await s.execute(text("DELETE FROM allowed_accounts WHERE user_id=:u"), {"u": uid})
-        await s.commit()
-    await update.message.reply_text(f"🗑️ Unlinked {uid}")
 
 @debug_handler
 async def removeallaccs(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1094,80 +1082,79 @@ async def export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buf = io.BytesIO("\n".join(lines).encode()); buf.name = "stats.txt"
     await update.message.reply_document(document=buf, filename="stats.txt")
 
+def paginate_list(items, page, page_size):
+    total_pages = (len(items) + page_size - 1) // page_size
+    start = (page - 1) * page_size
+    end = start + page_size
+    return items[start:end], total_pages
+
 @debug_handler
 async def creatorstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show creator's total views, payable amount, payment details, and submitted links"""
     uid = update.effective_user.id
+    page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
+    page_size = 10
+
     async with AsyncSessionLocal() as s:
-        # Get total views for this creator
         total_views = (await s.execute(
             text("SELECT COALESCE(total_views, 0) FROM users WHERE user_id = :u"),
             {"u": uid}
         )).scalar() or 0
-        total_views = float(total_views)
-        
-        # Calculate payable amount (views * 0.025 per 1000 views)
         payable_amount = (total_views / 1000) * 0.025
-        
-        # Get all links submitted by this creator
         links = [r[0] for r in (await s.execute(
             text("SELECT shortcode FROM reels WHERE user_id = :u"),
             {"u": uid}
         )).fetchall()]
-        
-        # Get total videos count
-        total_videos = len(links)
-        
-        # Get all Instagram handles
         handles = [r[0] for r in (await s.execute(
             text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :u"),
             {"u": uid}
         )).fetchall()]
-        if handles:
-            handles_str = ", ".join(f"<code>@{h}</code>" for h in handles)
-        else:
-            handles_str = "—"
-        
-        # Get payment details
         payment_details = (await s.execute(
             text("SELECT usdt_address, paypal_email, upi_address FROM payment_details WHERE user_id = :u"),
             {"u": uid}
         )).fetchone()
-        
         usdt, paypal, upi = payment_details or (None, None, None)
-        
-        # Format the message
+
+        handles_str = ", ".join(f"<code>@{h}</code>" for h in handles) if handles else "—"
         msg = [
             "👤 <b>Creator Statistics</b>",
             f"• Instagram: {handles_str}",
-            f"• Total Videos: <b>{total_videos}</b>",
+            f"• Total Videos: <b>{len(links)}</b>",
             f"• Total Views: <b>{int(total_views):,}</b>",
             f"• Payable Amount: <b>${payable_amount:,.2f}</b>",
             f"• Rate: <b>$25 per 1M Views</b>",
             "",
-            "💳 <b>Your Payment Methods:</b>"
+            "💳 <b>Your Payment Methods:</b>",
         ]
-        
-        # Add payment methods if they exist
-        if usdt:
-            msg.append(f"• USDT: <code>{usdt}</code>")
-        if paypal:
-            msg.append(f"• PayPal: <code>{paypal}</code>")
-        if upi:
-            msg.append(f"• UPI: <code>{upi}</code>")
-        if not any([usdt, paypal, upi]):
-            msg.append("• No payment methods added")
-        
-        msg.append("")
-        msg.append("🎥 <b>Your Submitted Links:</b>")
-        
-        # Add all links
-        if links:
-            msg += [f"• https://www.instagram.com/reel/{sc}/" for sc in links]
-        else:
-            msg.append("• No links submitted yet")
-        
-        await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
+        if usdt: msg.append(f"• USDT: <code>{usdt}</code>")
+        if paypal: msg.append(f"• PayPal: <code>{paypal}</code>")
+        if upi: msg.append(f"• UPI: <code>{upi}</code>")
+        if not any([usdt, paypal, upi]): msg.append("• No payment methods added")
+
+        msg.append("\n🎥 <b>Your Submitted Reels (Page {}/{})</b>".format(page, (len(links) + page_size - 1) // page_size))
+        links_page, total_pages = paginate_list(links, page, page_size)
+        msg += [f"• https://www.instagram.com/reel/{sc}/" for sc in links_page]
+
+        # Inline navigation buttons
+        buttons = []
+        if page > 1:
+            buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"creatorstats_{page-1}"))
+        if page < total_pages:
+            buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"creatorstats_{page+1}"))
+
+        markup = InlineKeyboardMarkup([buttons]) if buttons else None
+        await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML, reply_markup=markup)
+
+@debug_handler
+async def handle_creatorstats_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    match = re.match(r"creatorstats_(\d+)", query.data)
+    if not match:
+        return
+    page = int(match.group(1))
+    context.args = [str(page)]
+    update.message = query.message
+    await creatorstats(update, context)
 
 @debug_handler
 async def currentstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1204,12 +1191,14 @@ async def currentstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def allstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show statistics for all creators (except their links)"""
+    """Paginated allstats command for admins"""
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
-    
+
+    page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
+    page_size = 5  # 5 users per page
+
     async with AsyncSessionLocal() as s:
-        # Get all users with their stats and payment details
         users = (await s.execute(text("""
             SELECT 
                 u.user_id, 
@@ -1223,61 +1212,71 @@ async def allstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             WHERE u.total_views > 0
             ORDER BY u.total_views DESC
         """))).fetchall()
-        
+
         if not users:
             return await update.message.reply_text("No creator statistics available.")
-        
-        # Send stats for each creator
-        for user_id, username, views, usdt, paypal, upi in users:
+
+        user_list, total_pages = paginate_list(users, page, page_size)
+
+        for user_id, username, views, usdt, paypal, upi in user_list:
             views = float(views)
-            # Calculate payable amount (views * 0.025 per 1000 views)
             payable_amount = (views / 1000) * 0.025
-            
-            try:
-                # Try to get user's full name
-                chat = await context.bot.get_chat(user_id)
-                full_name = " ".join(filter(None, [chat.first_name, chat.last_name]))
-            except:
-                full_name = str(user_id)
-            
-            # Get total videos count
             total_videos = (await s.execute(
                 text("SELECT COUNT(*) FROM reels WHERE user_id = :u"),
                 {"u": user_id}
             )).scalar() or 0
-            
-            # Get all Instagram handles
             handles = [r[0] for r in (await s.execute(
                 text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :u"),
                 {"u": user_id}
             )).fetchall()]
-            
+
+            try:
+                chat = await context.bot.get_chat(user_id)
+                full_name = " ".join(filter(None, [chat.first_name, chat.last_name]))
+            except:
+                full_name = str(user_id)
+
             msg = [
-                f"👤 <b>Telegram Username:</b> {full_name}",
+                f"👤 <b>Telegram:</b> {full_name} (@{username or 'unknown'})",
                 f"📊 <b>Total Views:</b> {int(views):,}",
                 f"🎥 <b>Total Videos:</b> {total_videos}",
                 f"👥 <b>Total Accounts:</b> {len(handles)}",
-                "",
-                "📱 <b>Account Names:</b>"
+                "📱 <b>Accounts:</b>"
             ]
-            
-            # Add account names
-            if handles:
-                msg.extend([f"• @{h}" for h in handles])
-            else:
-                msg.append("• No accounts")
-            
-            msg.extend([
+            msg += [f"• @{h}" for h in handles] if handles else ["• No accounts"]
+            msg += [
                 "",
                 f"💰 <b>Payable Amount:</b> ${payable_amount:,.2f}",
+                f"💳 <b>USDT:</b> {usdt or '—'}",
+                f"💳 <b>PayPal:</b> {paypal or '—'}",
+                f"💳 <b>UPI:</b> {upi or '—'}",
                 "━━━━━━━━━━━━━━━━━━━━"
-            ])
-            
-            await context.bot.send_message(
-                update.effective_chat.id,
-                "\n".join(msg),
-                parse_mode=ParseMode.HTML
-            )
+            ]
+            await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
+
+        # Navigation buttons
+        buttons = []
+        if page > 1:
+            buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"allstats_{page-1}"))
+        if page < total_pages:
+            buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"allstats_{page+1}"))
+        markup = InlineKeyboardMarkup([buttons]) if buttons else None
+        await update.message.reply_text(
+            f"📄 Showing page {page} of {total_pages}",
+            reply_markup=markup
+        )
+@debug_handler
+async def handle_allstats_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    match = re.match(r"allstats_(\d+)", query.data)
+    if not match:
+        return
+    page = int(match.group(1))
+    context.args = [str(page)]
+    update.message = query.message
+    await allstats(update, context)
+
 
 @debug_handler
 async def add_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2823,7 +2822,9 @@ async def run_bot():
     
     # Add callback query handler for review buttons
     app.add_handler(CallbackQueryHandler(handle_review_callback))
-    
+    app.add_handler(CallbackQueryHandler(handle_allstats_page, pattern=r"^allstats_\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_creatorstats_page, pattern=r"^creatorstats_\d+$"))
+
     try:
         await app.initialize()
         await app.start()
