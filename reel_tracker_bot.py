@@ -2162,6 +2162,33 @@ async def migrate_allowed_accounts():
         """))
 
 @debug_handler
+async def userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+
+    if len(context.args) != 1:
+        return await update.message.reply_text("Usage: /userstats <user_id>")
+
+    user_id = int(context.args[0])
+    async with AsyncSessionLocal() as s:
+        user = await s.execute(text("SELECT total_views FROM users WHERE user_id = :u"), {"u": user_id})
+        user_views = user.scalar()
+
+        reels = await s.execute(text("SELECT shortcode FROM reels WHERE user_id = :u"), {"u": user_id})
+        reel_links = [f"https://www.instagram.com/reel/{row[0]}/" for row in reels.fetchall()]
+
+    if user_views is None:
+        return await update.message.reply_text("User not found.")
+
+    msg = [
+        f"📊 Stats for User ID: <code>{user_id}</code>",
+        f"• Total Views: <b>{user_views:,}</b>",
+        "🎥 Reels:",
+        *(reel_links or ["• No reels submitted."])
+    ]
+    await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
+
+@debug_handler
 async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to link a referred user to their referrer"""
     if not await is_admin(update.effective_user.id):
