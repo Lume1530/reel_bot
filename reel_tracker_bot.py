@@ -2602,6 +2602,24 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Unbanned user {user_id}")
     except ValueError:
         await update.message.reply_text("❌ Invalid user ID")
+        
+@debug_handler
+async def currentaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all currently allowed Instagram accounts."""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    
+    async with AsyncSessionLocal() as s:
+        results = await s.execute(text("SELECT user_id, insta_handle FROM allowed_accounts ORDER BY user_id"))
+        rows = results.fetchall()
+        if not rows:
+            return await update.message.reply_text("No linked Instagram accounts.")
+        
+        msg = ["📋 <b>Current Linked Instagram Accounts:</b>"]
+        for user_id, handle in rows:
+            msg.append(f"• @{handle} (user_id: <code>{user_id}</code>)")
+        
+        await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
 
 @debug_handler
 async def clearslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
