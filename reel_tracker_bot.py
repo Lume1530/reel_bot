@@ -2639,7 +2639,7 @@ async def run_bot():
     
     handlers = [
         ("start", start_cmd), ("addaccount", addaccount), ("banuser", banuser), ("removeaccount", removeaccount),
-        ("removeallaccs", removeallaccs), ("removeacc", removeacc), ("addviews", addviews_custom),
+        ("removeallaccs", removeallaccs), ("removeacc", removeacc), ("addviews", addviews),
         ("submit", submit), ("remove", remove), ("cleardata", cleardata), ("unban", unban),
         ("allstats", allstats), ("currentstats", currentstats), ("creatorstats", creatorstats),
         ("broadcast", broadcast), ("export", export), ("addusdt", add_usdt), ("currentaccounts", currentaccounts),
