@@ -872,111 +872,80 @@ async def cleardata(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show detailed statistics for a specific user"""
     if not await is_admin(update.effective_user.id):
-        return await update.message.reply_text("🚫 This command is for admins only")
-    
-    if len(context.args) != 1:
-        return await update.message.reply_text(
-            "Usage: /userstats <user_id>\n"
-            "Example: /userstats 123456789\n\n"
-            "This will show detailed statistics for the specified user."
-        )
-    
-    try:
-        user_id = int(context.args[0])
-        
-        async with AsyncSessionLocal() as s:
-            # Get user information
-            user = await s.execute(
-                text("SELECT username, total_views FROM users WHERE user_id = :u"),
-                {"u": user_id}
-            )
-            user_data = user.fetchone()
-            
-            if not user_data:
-                return await update.message.reply_text("❌ User not found in database")
-            
-            username, total_views = user_data
-            
-            # Get user's linked Instagram handles
-            handles = await s.execute(
-                text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :u"),
-                {"u": user_id}
-            )
-            instagram_handles = [h[0] for h in handles.fetchall()]
-            
-            # Get user's reels
-            reels = await s.execute(
-                text("SELECT shortcode FROM reels WHERE user_id = :u"),
-                {"u": user_id}
-            )
-            reel_codes = [r[0] for r in reels.fetchall()]
-            
-            # Get user's payment details
-            payment = await s.execute(
-                text("""
-                    SELECT usdt_address, paypal_email, upi_address 
-                    FROM payment_details 
-                    WHERE user_id = :u
-                """),
-                {"u": user_id}
-            )
-            payment_data = payment.fetchone()
-            
-            # Try to get user's Telegram info
-            try:
-                chat = await context.bot.get_chat(user_id)
-                full_name = chat.full_name
-                telegram_username = chat.username
-            except Exception as e:
-                logger.error(f"Failed to get chat info for {user_id}: {e}")
-                full_name = "Unknown"
-                telegram_username = username or "Unknown"
-            
-            # Build detailed message
-            msg = [
-                f"📊 <b>User Statistics for {full_name}</b>",
-                f"• Telegram: @{telegram_username or 'Unknown'}",
-                f"• User ID: {user_id}",
-                f"• Total Views: <b>{int(total_views or 0):,}</b>",
-                f"• Total Reels: <b>{len(reel_codes)}</b>",
-                "",
-                "📱 <b>Instagram Accounts:</b>"
-            ]
-            
-            if instagram_handles:
-                for handle in instagram_handles:
-                    msg.append(f"• @{handle}")
-            else:
-                msg.append("• No accounts linked")
-            
-            msg.append("")
-            msg.append("💰 <b>Payment Details:</b>")
-            
-            if payment_data:
-                usdt, paypal, upi = payment_data
-                if usdt:
-                    msg.append(f"• USDT: <code>{usdt}</code>")
-                if paypal:
-                    msg.append(f"• PayPal: <code>{paypal}</code>")
-                if upi:
-                    msg.append(f"• UPI: <code>{upi}</code>")
-                if not any([usdt, paypal, upi]):
-                    msg.append("• No payment methods added")
-            else:
-                msg.append("• No payment methods added")
-            
-            if reel_codes:
-                msg.append("")
-                msg.append("🎥 <b>Submitted Reels:</b>")
-                for code in reel_codes:
-                    msg.append(f"• https://www.instagram.com/reel/{code}/")
-            
-            await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
-            
-    except ValueError:
-        await update.message.reply_text("❌ Invalid user ID")
+        return await update.message.reply_text("🚫 Unauthorized")
+    page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
+    await send_userstats_page(update, context, page)
+
+#userstats pagination function
+async def send_userstats_page(source, context, page):
+    page_size = 1  # 1 user per page for clarity
+    async with AsyncSessionLocal() as s:
+        users = (await s.execute(text("""
+            SELECT 
+                u.user_id, u.username, u.total_views, 
+                p.usdt_address, p.paypal_email, p.upi_address
+            FROM users u
+            LEFT JOIN payment_details p ON u.user_id = p.user_id
+            WHERE u.total_views > 0
+            ORDER BY u.total_views DESC
+        """))).fetchall()
+
+        if not users:
+            return await source.message.reply_text("ℹ️ No user stats available.")
+
+        paged_users, total_pages = paginate_list(users, page, page_size)
+        user_id, username, views, usdt, paypal, upi = paged_users[0]
+
+        total_videos = (await s.execute(
+            text("SELECT COUNT(*) FROM reels WHERE user_id = :u"),
+            {"u": user_id}
+        )).scalar() or 0
+        handles = [r[0] for r in (await s.execute(
+            text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :u"),
+            {"u": user_id}
+        )).fetchall()]
+        try:
+            chat = await context.bot.get_chat(user_id)
+            name = chat.full_name
+        except:
+            name = str(user_id)
+
+        payable = (views / 1000) * 0.025
+        msg = [
+            f"👤 <b>{name}</b> (@{username or '—'})",
+            f"• Views: <b>{int(views):,}</b>",
+            f"• Videos: <b>{total_videos}</b>",
+            f"• Accounts: {', '.join(f'@{h}' for h in handles) if handles else '—'}",
+            f"• 💰 Payable: ${payable:.2f}",
+            "",
+            "<b>💳 Payment Methods:</b>",
+            f"• USDT: {usdt or '—'}",
+            f"• PayPal: {paypal or '—'}",
+            f"• UPI: {upi or '—'}",
+            f"\n📄 Page {page}/{total_pages}"
+        ]
+
+        buttons = []
+        if page > 1:
+            buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"userstats_{page - 1}"))
+        if page < total_pages:
+            buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"userstats_{page + 1}"))
+        markup = InlineKeyboardMarkup([buttons]) if buttons else None
+
+        send_fn = source.edit_message_text if hasattr(source, "edit_message_text") else source.message.reply_text
+        await send_fn("\n".join(msg), parse_mode=ParseMode.HTML, reply_markup=markup)
+
+@debug_handler
+async def handle_userstats_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    match = re.match(r"userstats_(\d+)", query.data)
+    if not match:
+        return
+    page = int(match.group(1))
+    await send_userstats_page(query, context, page)
+
 
 @debug_handler
 async def currentaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2807,6 +2776,7 @@ async def run_bot():
         app.add_handler(CommandHandler(cmd, h))
     
     # Add callback query handler for review buttons
+    app.add_handler(CallbackQueryHandler(handle_userstats_page, pattern=r"^userstats_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_creatorstats_page, pattern=r"^creatorstats_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_allstats_page, pattern=r"^allstats_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_currentaccounts_page, pattern=r"^currentaccounts_\d+$"))
