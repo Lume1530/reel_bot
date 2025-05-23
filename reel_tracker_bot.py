@@ -2587,6 +2587,23 @@ async def banuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid user ID")
 
 @debug_handler
+async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+
+    if len(context.args) != 1:
+        return await update.message.reply_text("Usage: /unban <user_id>")
+
+    try:
+        user_id = int(context.args[0])
+        async with AsyncSessionLocal() as s:
+            await s.execute(text("DELETE FROM banned_users WHERE user_id = :u"), {"u": user_id})
+            await s.commit()
+        await update.message.reply_text(f"✅ Unbanned user {user_id}")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
+
+@debug_handler
 async def clearslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear submissions for a specific slot"""
     if not await is_admin(update.effective_user.id):
