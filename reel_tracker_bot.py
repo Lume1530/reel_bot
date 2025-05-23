@@ -904,7 +904,6 @@ if not paged_users:
     )
 
 user_id, username, views, usdt, paypal, upi = paged_users[0]
-]
 
         total_videos = (await s.execute(
             text("SELECT COUNT(*) FROM reels WHERE user_id = :u"),
