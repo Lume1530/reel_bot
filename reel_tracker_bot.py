@@ -980,69 +980,61 @@ async def userstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def currentaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all Instagram accounts linked to users"""
     if not await is_admin(update.effective_user.id):
-        return await update.message.reply_text("🚫 This command is for admins only")
-    
+        return await update.message.reply_text("🚫 Unauthorized")
+    page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
+    await send_currentaccounts_page(update, context, page)
+
+#Current account Pagination Function
+async def send_currentaccounts_page(source, context, page):
+    page_size = 10
     async with AsyncSessionLocal() as s:
-        # Get all linked accounts with user info
-        accounts = await s.execute(
-            text("""
-                SELECT a.user_id, a.insta_handle, u.username, u.total_views
-                FROM allowed_accounts a
-                JOIN users u ON a.user_id = u.user_id
-                ORDER BY a.insta_handle
-            """)
-        )
-        account_data = accounts.fetchall()
-        
-        if not account_data:
-            return await update.message.reply_text("No Instagram accounts linked to any user.")
-        
-        # Group accounts by Instagram handle
-        by_handle = {}
-        for user_id, handle, username, views in account_data:
-            if handle not in by_handle:
-                by_handle[handle] = []
-            by_handle[handle].append((user_id, username, views))
-        
-        # Build message
-        msg = ["📱 <b>All Linked Instagram Accounts</b>\n"]
-        
-        for handle, users in sorted(by_handle.items()):
-            msg.append(f"• <b>@{handle}</b>")
-            for user_id, username, views in users:
-                try:
-                    chat = await context.bot.get_chat(user_id)
-                    user_name = chat.username or f"User {user_id}"
-                except:
-                    user_name = username or f"User {user_id}"
-                
-                msg.append(f"  - @{user_name}: {int(views or 0):,} views")
-            
+        accounts = await s.execute(text("""
+            SELECT a.user_id, a.insta_handle, u.username, u.total_views
+            FROM allowed_accounts a
+            JOIN users u ON a.user_id = u.user_id
+            ORDER BY LOWER(a.insta_handle)
+        """))
+        rows = accounts.fetchall()
+
+        if not rows:
+            return await source.message.reply_text("ℹ️ No Instagram accounts are currently linked.")
+
+        grouped = {}
+        for user_id, handle, username, views in rows:
+            grouped.setdefault(handle.lower(), []).append((user_id, username, views))
+
+        handles = sorted(grouped)
+        paged_handles, total_pages = paginate_list(handles, page, page_size)
+
+        msg = [f"📱 <b>Linked Accounts (Page {page}/{total_pages})</b>\n"]
+        for handle in paged_handles:
+            msg.append(f"🔹 <b>@{handle}</b>")
+            for user_id, username, views in grouped[handle]:
+                user_display = f"@{username}" if username else f"User {user_id}"
+                msg.append(f"   └ {user_display} — {int(views):,} views")
             msg.append("")
-        
-        # Send message, handling potential length issues
-        if len("\n".join(msg)) > 4000:
-            # Split into multiple messages if too long
-            current_msg = ["📱 <b>All Linked Instagram Accounts</b>\n"]
-            for line in msg[1:]:
-                if len("\n".join(current_msg + [line])) > 3900:
-                    await update.message.reply_text(
-                        "\n".join(current_msg), 
-                        parse_mode=ParseMode.HTML
-                    )
-                    current_msg = [line]
-                else:
-                    current_msg.append(line)
-            
-            if current_msg:
-                await update.message.reply_text(
-                    "\n".join(current_msg),
-                    parse_mode=ParseMode.HTML
-                )
-        else:
-            await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
+
+        buttons = []
+        if page > 1:
+            buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"currentaccounts_{page - 1}"))
+        if page < total_pages:
+            buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"currentaccounts_{page + 1}"))
+        markup = InlineKeyboardMarkup([buttons]) if buttons else None
+
+        send_fn = source.edit_message_text if hasattr(source, "edit_message_text") else source.message.reply_text
+        await send_fn("\n".join(msg), parse_mode=ParseMode.HTML, reply_markup=markup)
+
+@debug_handler
+async def handle_currentaccounts_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    match = re.match(r"currentaccounts_(\d+)", query.data)
+    if not match:
+        return
+    page = int(match.group(1))
+    await send_currentaccounts_page(query, context, page)
+
 
 @debug_handler
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1092,14 +1084,18 @@ def paginate_list(items, page, page_size):
 async def creatorstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
-    page_size = 10
+    await send_creatorstats_page(update, context, uid, page)
 
+#Creator stats pagination function
+async def send_creatorstats_page(source, context, uid, page):
+    page_size = 10
     async with AsyncSessionLocal() as s:
         total_views = (await s.execute(
             text("SELECT COALESCE(total_views, 0) FROM users WHERE user_id = :u"),
             {"u": uid}
         )).scalar() or 0
         payable_amount = (total_views / 1000) * 0.025
+
         links = [r[0] for r in (await s.execute(
             text("SELECT shortcode FROM reels WHERE user_id = :u"),
             {"u": uid}
@@ -1114,35 +1110,40 @@ async def creatorstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )).fetchone()
         usdt, paypal, upi = payment_details or (None, None, None)
 
-        handles_str = ", ".join(f"<code>@{h}</code>" for h in handles) if handles else "—"
         msg = [
-            "👤 <b>Creator Statistics</b>",
-            f"• Instagram: {handles_str}",
-            f"• Total Videos: <b>{len(links)}</b>",
+            "👤 <b>Your Creator Statistics</b>",
+            f"• Linked Instagram: {', '.join(f'@{h}' for h in handles) if handles else '—'}",
+            f"• Total Reels: <b>{len(links)}</b>",
             f"• Total Views: <b>{int(total_views):,}</b>",
-            f"• Payable Amount: <b>${payable_amount:,.2f}</b>",
-            f"• Rate: <b>$25 per 1M Views</b>",
+            f"• Payable: <b>${payable_amount:.2f}</b>",
+            "• Rate: $25 per 1M Views",
             "",
-            "💳 <b>Your Payment Methods:</b>",
+            "💳 <b>Payment Methods:</b>"
         ]
         if usdt: msg.append(f"• USDT: <code>{usdt}</code>")
         if paypal: msg.append(f"• PayPal: <code>{paypal}</code>")
         if upi: msg.append(f"• UPI: <code>{upi}</code>")
-        if not any([usdt, paypal, upi]): msg.append("• No payment methods added")
+        if not any([usdt, paypal, upi]):
+            msg.append("• No payment methods added")
 
-        msg.append("\n🎥 <b>Your Submitted Reels (Page {}/{})</b>".format(page, (len(links) + page_size - 1) // page_size))
+        # Pagination of reel links
         links_page, total_pages = paginate_list(links, page, page_size)
-        msg += [f"• https://www.instagram.com/reel/{sc}/" for sc in links_page]
+        msg.append(f"\n🎥 <b>Your Reels (Page {page}/{total_pages})</b>")
+        if links_page:
+            msg += [f"• https://www.instagram.com/reel/{sc}/" for sc in links_page]
+        else:
+            msg.append("• No reels submitted yet")
 
-        # Inline navigation buttons
         buttons = []
         if page > 1:
-            buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"creatorstats_{page-1}"))
+            buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"creatorstats_{page - 1}"))
         if page < total_pages:
-            buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"creatorstats_{page+1}"))
-
+            buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"creatorstats_{page + 1}"))
         markup = InlineKeyboardMarkup([buttons]) if buttons else None
-        await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML, reply_markup=markup)
+
+        send_fn = source.edit_message_text if hasattr(source, "edit_message_text") else source.message.reply_text
+        await send_fn("\n".join(msg), parse_mode=ParseMode.HTML, reply_markup=markup)
+
 
 @debug_handler
 async def handle_creatorstats_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1152,9 +1153,7 @@ async def handle_creatorstats_page(update: Update, context: ContextTypes.DEFAULT
     if not match:
         return
     page = int(match.group(1))
-    context.args = [str(page)]
-    update.message = query.message
-    await creatorstats(update, context)
+    await send_creatorstats_page(query, context, query.from_user.id, page)
 
 @debug_handler
 async def currentstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2810,6 +2809,7 @@ async def run_bot():
     # Add callback query handler for review buttons
     app.add_handler(CallbackQueryHandler(handle_creatorstats_page, pattern=r"^creatorstats_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_allstats_page, pattern=r"^allstats_\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_currentaccounts_page, pattern=r"^currentaccounts_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_review_callback, pattern=r"^(approve|reject)_\d+$"))
 
 
