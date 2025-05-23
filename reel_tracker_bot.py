@@ -2829,6 +2829,7 @@ async def run_bot():
         ("addviews", addviews_custom),
         ("submit", submit), 
         ("remove", remove), 
+        ("userinfo", userinfo),
         ("cleardata", cleardata),
         ("allstats", allstats), 
         ("currentstats", currentstats), 
