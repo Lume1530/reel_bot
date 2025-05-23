@@ -1191,36 +1191,28 @@ async def currentstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def allstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Paginated allstats command for admins"""
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
-
-    page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
-    page_size = 5  # 5 users per page
-
+    await send_allstats_page(update, context, page=1)
+    
+# Allstats Pagination Function
+async def send_allstats_page(source, context, page):
+    page_size = 5
     async with AsyncSessionLocal() as s:
         users = (await s.execute(text("""
             SELECT 
-                u.user_id, 
-                u.username, 
-                u.total_views, 
-                p.usdt_address,
-                p.paypal_email,
-                p.upi_address
+                u.user_id, u.username, u.total_views, 
+                p.usdt_address, p.paypal_email, p.upi_address
             FROM users u
             LEFT JOIN payment_details p ON u.user_id = p.user_id
             WHERE u.total_views > 0
             ORDER BY u.total_views DESC
         """))).fetchall()
 
-        if not users:
-            return await update.message.reply_text("No creator statistics available.")
-
         user_list, total_pages = paginate_list(users, page, page_size)
+        msg_blocks = []
 
         for user_id, username, views, usdt, paypal, upi in user_list:
-            views = float(views)
-            payable_amount = (views / 1000) * 0.025
             total_videos = (await s.execute(
                 text("SELECT COUNT(*) FROM reels WHERE user_id = :u"),
                 {"u": user_id}
@@ -1229,42 +1221,41 @@ async def allstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :u"),
                 {"u": user_id}
             )).fetchall()]
-
             try:
                 chat = await context.bot.get_chat(user_id)
-                full_name = " ".join(filter(None, [chat.first_name, chat.last_name]))
+                name = chat.full_name
             except:
-                full_name = str(user_id)
+                name = str(user_id)
 
-            msg = [
-                f"👤 <b>Telegram:</b> {full_name} (@{username or 'unknown'})",
-                f"📊 <b>Total Views:</b> {int(views):,}",
-                f"🎥 <b>Total Videos:</b> {total_videos}",
-                f"👥 <b>Total Accounts:</b> {len(handles)}",
-                "📱 <b>Accounts:</b>"
-            ]
-            msg += [f"• @{h}" for h in handles] if handles else ["• No accounts"]
-            msg += [
-                "",
-                f"💰 <b>Payable Amount:</b> ${payable_amount:,.2f}",
-                f"💳 <b>USDT:</b> {usdt or '—'}",
-                f"💳 <b>PayPal:</b> {paypal or '—'}",
-                f"💳 <b>UPI:</b> {upi or '—'}",
+            payable = (views / 1000) * 0.025
+            msg_blocks.append("\n".join([
+                f"👤 <b>{name}</b> (@{username or '—'})",
+                f"• Views: <b>{int(views):,}</b>",
+                f"• Videos: {total_videos}",
+                f"• Accounts: {', '.join(f'@{h}' for h in handles) if handles else '—'}",
+                f"• 💰 Payable: ${payable:.2f}",
                 "━━━━━━━━━━━━━━━━━━━━"
-            ]
-            await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
+            ]))
 
-        # Navigation buttons
+        full_msg = "\n\n".join(msg_blocks)
+        footer = f"\n📄 Page {page}/{total_pages}"
         buttons = []
         if page > 1:
-            buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"allstats_{page-1}"))
+            buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"allstats_{page - 1}"))
         if page < total_pages:
-            buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"allstats_{page+1}"))
+            buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"allstats_{page + 1}"))
         markup = InlineKeyboardMarkup([buttons]) if buttons else None
-        await update.message.reply_text(
-            f"📄 Showing page {page} of {total_pages}",
+
+        send_fn = (
+            source.edit_message_text if hasattr(source, "edit_message_text")
+            else source.message.reply_text
+        )
+        await send_fn(
+            text=full_msg + footer,
+            parse_mode=ParseMode.HTML,
             reply_markup=markup
         )
+
 @debug_handler
 async def handle_allstats_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1273,10 +1264,7 @@ async def handle_allstats_page(update: Update, context: ContextTypes.DEFAULT_TYP
     if not match:
         return
     page = int(match.group(1))
-    context.args = [str(page)]
-    update.message = query.message
-    await allstats(update, context)
-
+    await send_allstats_page(query, context, page)
 
 @debug_handler
 async def add_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
