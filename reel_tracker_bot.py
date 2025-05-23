@@ -892,10 +892,11 @@ async def send_userstats_page(source, context, page):
             WHERE u.total_views > 0
             ORDER BY u.total_views DESC
         """))).fetchall()
-
-        if not users:
-            return await source.message.reply_text("ℹ️ No user stats available.")
-        paged_users, total_pages = paginate_list(users, page, page_size)
+        if not paged_users:
+        return await source.message.reply_text(
+        f"❌ Page {page} does not exist. Only {total_pages} page(s) available.",
+        parse_mode=ParseMode.HTML
+        )
         user_id, username, views, usdt, paypal, upi = paged_users[0]
 
         total_videos = (await s.execute(
