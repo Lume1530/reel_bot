@@ -366,7 +366,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/review &lt;user_id&gt;</code> - Review account link requests",
             "• <code>/removeallaccs &lt;user_id&gt;</code> - Remove all accounts for a user",
             "• <code>/removeacc &lt;user_id&gt; &lt;@handle&gt;</code> - Remove specific account",
-            "• <code>/userinfo</code> - View Users Reels",
+            "• <code>/userstats</code> - View Users Reels",
             "• <code>/currentstats</code> - Show total views and working accounts",
             "• <code>/broadcast &lt;message&gt;</code> - Send message to all users",
             "• <code>/cleardata</code> - Clear all reel links",
