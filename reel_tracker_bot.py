@@ -2820,9 +2820,10 @@ async def run_bot():
         app.add_handler(CommandHandler(cmd, h))
     
     # Add callback query handler for review buttons
-    app.add_handler(CallbackQueryHandler(handle_review_callback))
-    app.add_handler(CallbackQueryHandler(handle_allstats_page, pattern=r"^allstats_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_creatorstats_page, pattern=r"^creatorstats_\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_allstats_page, pattern=r"^allstats_\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_review_callback, pattern=r"^(approve|reject)_\d+$"))
+
 
     try:
         await app.initialize()
