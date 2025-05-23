@@ -2045,89 +2045,6 @@ async def slotstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
 
-@debug_handler
-async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id):
-        return await update.message.reply_text("🚫 Unauthorized")
-
-    if not context.args or not context.args[0].isdigit():
-        return await update.message.reply_text("Usage: /userinfo <user_id>")
-
-    target_uid = int(context.args[0])
-    await send_userinfo_page(update, context, target_uid, page=1)
-
-#userinfo pagination Function
-async def send_userinfo_page(source, context, uid, page):
-    page_size = 10
-    async with AsyncSessionLocal() as s:
-        # Basic info
-        total_views = (await s.execute(
-            text("SELECT COALESCE(total_views, 0) FROM users WHERE user_id = :u"),
-            {"u": uid}
-        )).scalar() or 0
-        payable = (total_views / 1000) * 0.025
-        handles = [r[0] for r in (await s.execute(
-            text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :u"),
-            {"u": uid}
-        )).fetchall()]
-        payment = (await s.execute(
-            text("SELECT usdt_address, paypal_email, upi_address FROM payment_details WHERE user_id = :u"),
-            {"u": uid}
-        )).fetchone()
-        usdt, paypal, upi = payment or (None, None, None)
-        reels = [r[0] for r in (await s.execute(
-            text("SELECT shortcode FROM reels WHERE user_id = :u"),
-            {"u": uid}
-        )).fetchall()]
-
-        try:
-            chat = await context.bot.get_chat(uid)
-            name = chat.full_name
-            username = f"@{chat.username}" if chat.username else f"ID {uid}"
-        except:
-            name = f"ID {uid}"
-            username = f"ID {uid}"
-
-        # Pagination
-        paged_reels, total_pages = paginate_list(reels, page, page_size)
-
-        # Message
-        msg = [
-            f"👤 <b>{name}</b> ({username})",
-            f"📸 Instagram: {', '.join(f'@{h}' for h in handles) if handles else '—'}",
-            f"🎥 Total Reels: <b>{len(reels)}</b>",
-            f"👁️ Total Views: <b>{int(total_views):,}</b>",
-            f"💰 Payable Amount: <b>${payable:.2f}</b>",
-            "",
-            "💳 <b>Payment Methods</b>",
-            f"• USDT: {usdt or '—'}",
-            f"• PayPal: {paypal or '—'}",
-            f"• UPI: {upi or '—'}",
-            f"\n🎞️ <b>Reels (Page {page}/{total_pages})</b>"
-        ]
-        msg += [f"• https://www.instagram.com/reel/{sc}/" for sc in paged_reels] or ["• No reels submitted."]
-
-        # Buttons
-        buttons = []
-        if page > 1:
-            buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"userinfo_{uid}_{page-1}"))
-        if page < total_pages:
-            buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"userinfo_{uid}_{page+1}"))
-        markup = InlineKeyboardMarkup([buttons]) if buttons else None
-
-        send_fn = source.edit_message_text if hasattr(source, "edit_message_text") else source.message.reply_text
-        await send_fn("\n".join(msg), parse_mode=ParseMode.HTML, reply_markup=markup)
-
-@debug_handler
-async def handle_userinfo_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    match = re.match(r"userinfo_(\d+)_(\d+)", query.data)
-    if not match:
-        return
-    uid = int(match.group(1))
-    page = int(match.group(2))
-    await send_userinfo_page(query, context, uid, page)
 
 @debug_handler
 async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2829,7 +2746,6 @@ async def run_bot():
         ("addviews", addviews_custom),
         ("submit", submit), 
         ("remove", remove), 
-        ("userinfo", userinfo),
         ("cleardata", cleardata),
         ("allstats", allstats), 
         ("currentstats", currentstats), 
@@ -2868,7 +2784,6 @@ async def run_bot():
     app.add_handler(CallbackQueryHandler(handle_allstats_page, pattern=r"^allstats_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_currentaccounts_page, pattern=r"^currentaccounts_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_review_callback, pattern=r"^(approve|reject)_\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_userinfo_page, pattern=r"^userinfo_\d+_\d+$"))
 
 
     try:
