@@ -588,77 +588,171 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def removeallaccs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    async with AsyncSessionLocal() as s:
-        # Get all handles for log (optional)
-        handles = [r[0] for r in (await s.execute(
-            text("SELECT insta_handle FROM allowed_accounts WHERE user_id = :uid"),
-            {"uid": uid}
-        )).fetchall()]
-
-        if not handles:
-            return await update.message.reply_text("ℹ️ You have no linked Instagram accounts.")
-
-        # Delete all allowed accounts
-        await s.execute(
-            text("DELETE FROM allowed_accounts WHERE user_id = :uid"),
-            {"uid": uid}
+    """Remove all Instagram accounts for a user and their associated reels"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 This command is for admins only")
+    
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "Usage: /removeallaccs <user_id>\n"
+            "Example: /removeallaccs 123456789"
         )
-
-        # Delete all reels
-        await s.execute(
-            text("DELETE FROM reels WHERE user_id = :uid"),
-            {"uid": uid}
-        )
-
-        # Reset total views
-        await s.execute(
-            text("UPDATE users SET total_views = 0 WHERE user_id = :uid"),
-            {"uid": uid}
-        )
-
-        await s.commit()
-        await update.message.reply_text(
-            f"✅ Removed all linked accounts and reels ({len(handles)} accounts).\n🔁 Total views reset to 0."
-        )
+    
+    try:
+        user_id = int(context.args[0])
+        
+        async with AsyncSessionLocal() as s:
+            # Get count of accounts before deletion
+            account_count = (await s.execute(
+                text("SELECT COUNT(*) FROM allowed_accounts WHERE user_id = :u"),
+                {"u": user_id}
+            )).scalar() or 0
+            
+            if account_count == 0:
+                return await update.message.reply_text("❌ User has no linked accounts")
+            
+            # Delete all accounts
+            await s.execute(
+                text("DELETE FROM allowed_accounts WHERE user_id = :u"),
+                {"u": user_id}
+            )
+            
+            # Delete all reels for this user
+            reel_count = (await s.execute(
+                text("SELECT COUNT(*) FROM reels WHERE user_id = :u"),
+                {"u": user_id}
+            )).scalar() or 0
+            
+            await s.execute(
+                text("DELETE FROM reels WHERE user_id = :u"),
+                {"u": user_id}
+            )
+            
+            # Reset user's total views
+            await s.execute(
+                text("UPDATE users SET total_views = 0 WHERE user_id = :u"),
+                {"u": user_id}
+            )
+            
+            await s.commit()
+            
+            # Get username for confirmation
+            try:
+                chat = await context.bot.get_chat(user_id)
+                user_name = chat.username or str(user_id)
+            except:
+                user_name = str(user_id)
+            
+            await update.message.reply_text(
+                f"✅ Removed all {account_count} accounts and {reel_count} reels for @{user_name}\n"
+                f"Total views have been reset to 0."
+            )
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
 
 @debug_handler
 async def removeacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not context.args:
-        return await update.message.reply_text("Usage: /removeacc <insta_handle>")
-
-    handle = context.args[0].lstrip('@').lower()
-
-    async with AsyncSessionLocal() as s:
-        # Delete the account
-        result = await s.execute(
-            text("DELETE FROM allowed_accounts WHERE user_id = :uid AND LOWER(insta_handle) = :h RETURNING *"),
-            {"uid": uid, "h": handle}
+    """Remove a specific Instagram account for a user and its associated reels"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 This command is for admins only")
+    
+    if len(context.args) != 2:
+        return await update.message.reply_text(
+            "Usage: /removeacc <user_id> <@handle>\n"
+            "Example: /removeacc 123456789 johndoe"
         )
-        removed = result.rowcount
-        if not removed:
-            return await update.message.reply_text(f"❌ No such Instagram handle linked: @{handle}")
-
-        # Delete reels linked to that handle
-        await s.execute(
-            text("DELETE FROM reels WHERE user_id = :uid AND LOWER(insta_handle) = :h"),
-            {"uid": uid, "h": handle}
-        )
-
-        # Recalculate total views
-        remaining = await s.execute(
-            text("SELECT play_count FROM reels WHERE user_id = :uid"),
-            {"uid": uid}
-        )
-        views = sum([r[0] or 0 for r in remaining.fetchall()])
-        await s.execute(
-            text("UPDATE users SET total_views = :v WHERE user_id = :uid"),
-            {"v": views, "uid": uid}
-        )
-
-        await s.commit()
-        await update.message.reply_text(f"✅ Removed @{handle} and all associated reels.\n🔁 Total views updated.")
+    
+    try:
+        user_id = int(context.args[0])
+        handle = context.args[1].lstrip("@")
+        
+        async with AsyncSessionLocal() as s:
+            # Check if account exists
+            exists = await s.execute(
+                text("""
+                    SELECT 1 FROM allowed_accounts 
+                    WHERE user_id = :u AND insta_handle = :h
+                """),
+                {"u": user_id, "h": handle}
+            )
+            
+            if not exists.scalar():
+                return await update.message.reply_text(
+                    f"❌ @{handle} is not linked to this user"
+                )
+            
+            # Delete the account
+            await s.execute(
+                text("""
+                    DELETE FROM allowed_accounts 
+                    WHERE user_id = :u AND insta_handle = :h
+                """),
+                {"u": user_id, "h": handle}
+            )
+            
+            # Delete all reels that belong to this Instagram handle
+            # First get all reels for this user
+            reels = await s.execute(
+                text("SELECT shortcode FROM reels WHERE user_id = :u"),
+                {"u": user_id}
+            )
+            reel_codes = [r[0] for r in reels.fetchall()]
+            
+            # Then check which reels belong to this handle
+            reels_to_delete = []
+            for code in reel_codes:
+                try:
+                    reel_data = await get_reel_data(code)
+                    if reel_data['owner_username'].lower() == handle.lower():
+                        reels_to_delete.append(code)
+                except Exception:
+                    continue
+            
+            # Delete the matching reels
+            for code in reels_to_delete:
+                await s.execute(
+                    text("DELETE FROM reels WHERE shortcode = :c AND user_id = :u"),
+                    {"c": code, "u": user_id}
+                )
+            
+            # Recalculate total views for this user
+            remaining_reels = await s.execute(
+                text("SELECT shortcode FROM reels WHERE user_id = :u"),
+                {"u": user_id}
+            )
+            remaining_codes = [r[0] for r in remaining_reels.fetchall()]
+            
+            total_views = 0
+            for code in remaining_codes:
+                try:
+                    reel_data = await get_reel_data(code)
+                    total_views += reel_data['view_count']
+                except Exception:
+                    continue
+            
+            await s.execute(
+                text("UPDATE users SET total_views = :v WHERE user_id = :u"),
+                {"v": total_views, "u": user_id}
+            )
+            
+            await s.commit()
+            
+            # Get username for confirmation
+            try:
+                chat = await context.bot.get_chat(user_id)
+                user_name = chat.username or str(user_id)
+            except:
+                user_name = str(user_id)
+            
+            await update.message.reply_text(
+                f"✅ Removed @{handle} from @{user_name}\n"
+                f"Deleted {len(reels_to_delete)} reels associated with this account.\n"
+                f"Updated total views: {total_views:,}"
+            )
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
 
 
 @debug_handler
