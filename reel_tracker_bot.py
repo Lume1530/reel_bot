@@ -2732,15 +2732,15 @@ def get_creator_badge(total_views, total_reels, payout):
     badges = []
 
     if total_views > 1_000_000:
-        badges = ["🎯 Viral Visionary", "🔥 Reel Rockstar", "🏆 Content Legend"]
+        badges = ["Viral Visionary", "Reel Rockstar", "Content Legend"]
     elif total_views > 100_000:
-        badges = ["🚀 Rising Creator", "⚡ Trendsetter", "🎥 Storyteller"]
+        badges = ["Rising Creator", "Trendsetter", "Storyteller"]
     elif total_reels > 500:
-        badges = ["🎬 Reel Machine", "⚙️ Content Craftsman", "📽️ Film Artisan"]
+        badges = ["Reel Machine", "Content Craftsman", "Film Artisan"]
     elif payout > 100:
-        badges = ["💰 Monetization Master", "💎 Profit Pro", "💼 Hustle Hero"]
+        badges = ["Monetization Master", "Profit Pro", "Hustle Hero"]
     else:
-        badges = ["✨ Aspiring Creator", "🌱 Growing Talent", "🌟 Future Star"]
+        badges = ["Aspiring Creator", "Growing Talent", "Future Star"]
 
     return random.choice(badges)
 
@@ -2791,7 +2791,7 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     #quote badge
     badge = get_creator_badge(total_views, total_reels, payout)
-    badge_y = uname_y + 50
+    badge_y = uname_y + 100
     badge_x = (1024 - draw.textlength(badge, font=small_font)) // 2
     draw.text((badge_x, badge_y), badge, font=small_font, fill="#222")
 
