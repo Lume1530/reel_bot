@@ -2742,22 +2742,6 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payout = round((total_views / 1000) * 0.025, 2)
 
 
-    def get_creator_badge(total_views, total_reels, payout):
-    badges = []
-
-    if total_views > 1_000_000:
-        badges = ["🎯 Viral Visionary", "🔥 Reel Rockstar", "🏆 Content Legend"]
-    elif total_views > 100_000:
-        badges = ["🚀 Rising Creator", "⚡ Trendsetter", "🎥 Storyteller"]
-    elif total_reels > 500:
-        badges = ["🎬 Reel Machine", "⚙️ Content Craftsman", "📽️ Film Artisan"]
-    elif payout > 100:
-        badges = ["💰 Monetization Master", "💎 Profit Pro", "💼 Hustle Hero"]
-    else:
-        badges = ["✨ Aspiring Creator", "🌱 Growing Talent", "🌟 Future Star"]
-
-    return random.choice(badges)
-
     # Load 1024x1024 background template
     bg = Image.open("template_profile_card.png").convert("RGB")
     draw = ImageDraw.Draw(bg)
@@ -2789,11 +2773,6 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
     draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
 
-    #quote badge
-    badge = get_creator_badge(total_views, total_reels, payout)
-    badge_y = uname_y + 50
-    badge_x = (1024 - draw.textlength(badge, font=small_font)) // 2
-    draw.text((badge_x, badge_y), badge, font=small_font, fill="#222")
 
     # ✅ Stats (keep as-is, just move down slightly)
     stats = [
