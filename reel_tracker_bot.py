@@ -5,7 +5,7 @@ import logging
 import requests
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
-import io
+from io import BytesIO
 import time
 
 from dotenv import load_dotenv
