@@ -2743,10 +2743,6 @@ async def remove_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ UPI address has been removed.")
 
 #Profile
-from PIL import Image, ImageDraw, ImageFont
-import requests
-from io import BytesIO
-
 def format_millions(n):
     return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
 
@@ -2768,50 +2764,51 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     draw = ImageDraw.Draw(bg)
 
     # Fonts
-    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
-    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32)
 
-    # Load & center circular PFP
+    # PFP (160x160), centered
     try:
         photos = await context.bot.get_user_profile_photos(user_id, limit=1)
         if photos.total_count > 0:
             file = await context.bot.get_file(photos.photos[0][0].file_id)
             img_data = requests.get(file.file_path).content
-            pfp = Image.open(BytesIO(img_data)).resize((120, 120)).convert("RGB")
+            pfp = Image.open(BytesIO(img_data)).resize((160, 160)).convert("RGB")
         else:
-            pfp = Image.new("RGB", (120, 120), "#ccc")
+            pfp = Image.new("RGB", (160, 160), "#ccc")
     except:
-        pfp = Image.new("RGB", (120, 120), "#ccc")
+        pfp = Image.new("RGB", (160, 160), "#ccc")
 
-    mask = Image.new("L", (120, 120), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 120, 120), fill=255)
-    pfp_x = (bg.width - 120) // 2
-    bg.paste(pfp, (pfp_x, 100), mask)
+    mask = Image.new("L", (160, 160), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, 160, 160), fill=255)
+    pfp_x = (1024 - 160) // 2
+    pfp_y = 130
+    bg.paste(pfp, (pfp_x, pfp_y), mask)
 
-    # Username below profile pic
-    uname_text = username
-    uname_x = (bg.width - draw.textlength(uname_text, font=bold_font)) // 2
-    draw.text((uname_x, 235), uname_text, font=bold_font, fill="#222")
+    # Username centered below PFP
+    uname_y = pfp_y + 180
+    uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
+    draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
 
-    # Stats row — centered horizontally
+    # Stats row — evenly spaced
     stats = [
         (format_millions(total_views), "VIEWS"),
         (str(total_reels), "REELS"),
         (f"${payout:,.2f}", "PAYOUT")
     ]
-    spacing = 180
-    x_start = 60
-    y_top = 300
+
+    x_positions = [160, 430, 700]
+    stats_y = 480
 
     for i, (val, label) in enumerate(stats):
-        x = x_start + i * spacing
-        draw.text((x, y_top), val, font=bold_font, fill="#111")
-        draw.text((x, y_top + 30), label, font=small_font, fill="#777")
+        draw.text((x_positions[i], stats_y), val, font=bold_font, fill="#111")
+        draw.text((x_positions[i], stats_y + 50), label, font=small_font, fill="#666")
 
-    # Output as image
+    # Save image to memory
     buffer = BytesIO()
     bg.save(buffer, format="PNG")
     buffer.seek(0)
+
     await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")
 
 
