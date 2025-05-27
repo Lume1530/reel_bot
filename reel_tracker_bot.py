@@ -2166,31 +2166,20 @@ async def slotstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate a private campaign leaderboard image with Telegram first names and total views."""
+    """Generate private campaign leaderboard image without username censor, using first name."""
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
 
     import io
     from PIL import Image, ImageDraw, ImageFont
 
-    # Load background
-    bg_path = "private_leaderboard_bg.png"
-    try:
-        bg = Image.open(bg_path).convert("RGBA")
-    except Exception as e:
-        return await update.message.reply_text(f"❌ Could not load leaderboard background: {e}")
-
-    # Colors
-    red = (220, 38, 54)
-    white = (255, 255, 255)
-
-    # Fonts
-    try:
-        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 48)
-        font_box = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
-        font_views = ImageFont.truetype("DejaVuSans.ttf", 22)
-    except:
-        font_title = font_box = font_views = ImageFont.load_default()
+    # Leaderboard box layout
+    cols = 6
+    box_w, box_h = 210, 70
+    pad_x, pad_y = 20, 18
+    spacing_x, spacing_y = 18, 18
+    margin_top = 150
+    margin_side = 30
 
     # Load leaderboard data
     async with AsyncSessionLocal() as s:
@@ -2216,37 +2205,46 @@ async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "views": int(views)
         })
 
-    # Layout settings
-    cols = 6
-    box_w, box_h = 210, 70
-    pad_x, pad_y = 20, 18
-    margin_x, margin_y = 30, 180
-    spacing_x, spacing_y = 18, 18
-
     rows = (len(leaderboard) + cols - 1) // cols
-    img_height = max(bg.height, margin_y + rows * (box_h + spacing_y) + 30)
-    img = Image.new("RGBA", (bg.width, img_height), (0, 0, 0, 255))
-    img.paste(bg, (0, 0))
+
+    # Calculate dynamic canvas size
+    img_width = margin_side * 2 + cols * box_w + (cols - 1) * spacing_x
+    img_height = margin_top + rows * box_h + (rows - 1) * spacing_y + 50
+
+    # Create background
+    img = Image.new("RGBA", (img_width, img_height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img)
+
+    # Colors
+    red = (220, 38, 54)
+    white = (255, 255, 255)
+
+    # Fonts
+    try:
+        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 48)
+        font_box = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
+        font_views = ImageFont.truetype("DejaVuSans.ttf", 22)
+    except:
+        font_title = font_box = font_views = ImageFont.load_default()
 
     # Title
     title = "Leaderboard for\nprivate Campaign"
     bbox = draw.multiline_textbbox((0, 0), title, font=font_title)
     title_w = bbox[2] - bbox[0]
     draw.multiline_text(
-        ((img.width - title_w) // 2, 30),
+        ((img_width - title_w) // 2, 30),
         title,
         font=font_title,
         fill=white,
         align="center"
     )
 
-    # Draw boxes
+    # Draw all leaderboard boxes
     for idx, entry in enumerate(leaderboard):
         row = idx // cols
         col = idx % cols
-        x = margin_x + col * (box_w + spacing_x)
-        y = margin_y + row * (box_h + spacing_y)
+        x = margin_side + col * (box_w + spacing_x)
+        y = margin_top + row * (box_h + spacing_y)
         draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=15, fill=red)
         draw.text((x + pad_x, y + 8), f"{idx+1}. {entry['name']}", font=font_box, fill=white)
         draw.text((x + pad_x, y + 38), f"{entry['views']:,} views", font=font_views, fill=white)
@@ -2260,6 +2258,7 @@ async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo=img_byte_arr,
         caption="🏆 Private Campaign Leaderboard"
     )
+
 
 
 
