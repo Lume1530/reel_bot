@@ -2759,7 +2759,7 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_reels = (await s.execute(text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id})).scalar()
         payout = round((total_views / 1000) * 0.025, 2)
 
-    # Load your exact card background
+    # Load 1024x1024 background template
     bg = Image.open("template_profile_card.png").convert("RGB")
     draw = ImageDraw.Draw(bg)
 
@@ -2767,44 +2767,43 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 44)
     small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
 
-    # Load and resize profile picture
+    # Load and process profile photo
     try:
         photos = await context.bot.get_user_profile_photos(user_id, limit=1)
         if photos.total_count > 0:
             file = await context.bot.get_file(photos.photos[0][0].file_id)
-            pfp_data = requests.get(file.file_path).content
-            pfp = Image.open(BytesIO(pfp_data)).resize((160, 160)).convert("RGB")
+            img_data = requests.get(file.file_path).content
+            pfp = Image.open(BytesIO(img_data)).resize((180, 180)).convert("RGB")
         else:
-            pfp = Image.new("RGB", (160, 160), "#ccc")
+            pfp = Image.new("RGB", (180, 180), "#ccc")
     except:
-        pfp = Image.new("RGB", (160, 160), "#ccc")
+        pfp = Image.new("RGB", (180, 180), "#ccc")
 
-    # Mask and paste profile picture perfectly on the grey circle
-    mask = Image.new("L", (160, 160), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 160, 160), fill=255)
-    pfp_x = (768 - 160) // 2  # center
-    pfp_y = 170               # visually aligns with grey circle in your template
+    # Apply circular mask and paste at exact center of grey circle
+    mask = Image.new("L", (180, 180), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, 180, 180), fill=255)
+    pfp_x, pfp_y = 318, 422  # calculated from center (408, 512)
     bg.paste(pfp, (pfp_x, pfp_y), mask)
 
-    # Username below profile picture
-    uname_y = pfp_y + 170
-    uname_x = (768 - draw.textlength(username, font=bold_font)) // 2
+    # Username under PFP
+    uname_y = pfp_y + 180 + 20  # 622
+    uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
     draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
 
-    # Stats: Views | Reels | Payout
+    # Stats row
     stats = [
         (format_millions(total_views), "VIEWS"),
         (str(total_reels), "REELS"),
         (f"${payout:,.2f}", "PAYOUT")
     ]
-    x_positions = [100, 310, 520]  # 3 columns
-    stats_y = uname_y + 70
+    stat_xs = [140, 408, 680]  # evenly spaced
+    stat_y = uname_y + 60
 
     for i, (val, label) in enumerate(stats):
-        draw.text((x_positions[i], stats_y), val, font=bold_font, fill="#111")
-        draw.text((x_positions[i], stats_y + 35), label, font=small_font, fill="#666")
+        draw.text((stat_xs[i], stat_y), val, font=bold_font, fill="#111")
+        draw.text((stat_xs[i], stat_y + 40), label, font=small_font, fill="#666")
 
-    # Save and send
+    # Send image
     buffer = BytesIO()
     bg.save(buffer, format="PNG")
     buffer.seek(0)
