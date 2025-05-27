@@ -3,6 +3,7 @@ import re
 import asyncio
 import logging
 import requests
+import io
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
