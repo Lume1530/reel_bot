@@ -2764,8 +2764,7 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         username, total_views = row
         total_reels = (await s.execute(text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id})).scalar()
-        payout = (await s.execute(text("SELECT COALESCE(SUM(payout_pending), 0) FROM users WHERE user_id = :u"), {"u": user_id})).scalar()
-
+        payout = round((total_views / 1000) * 0.025, 2)
     # Load background image
     with open("template_profile_card.png", "rb") as f:
         bg = Image.open(f).convert("RGB")
