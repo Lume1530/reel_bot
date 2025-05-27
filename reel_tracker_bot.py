@@ -2759,50 +2759,57 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_reels = (await s.execute(text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id})).scalar()
         payout = round((total_views / 1000) * 0.025, 2)
 
-    # Load background
+    # Load your exact card background
     bg = Image.open("template_profile_card.png").convert("RGB")
     draw = ImageDraw.Draw(bg)
 
     # Fonts
-    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 42)
-    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 44)
+    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
 
-    # Load and paste circular PFP
+    # Load and resize profile picture
     try:
         photos = await context.bot.get_user_profile_photos(user_id, limit=1)
         if photos.total_count > 0:
             file = await context.bot.get_file(photos.photos[0][0].file_id)
-            img_data = requests.get(file.file_path).content
-            pfp = Image.open(BytesIO(img_data)).resize((180, 180)).convert("RGB")
+            pfp_data = requests.get(file.file_path).content
+            pfp = Image.open(BytesIO(pfp_data)).resize((160, 160)).convert("RGB")
         else:
-            pfp = Image.new("RGB", (180, 180), "#ccc")
+            pfp = Image.new("RGB", (160, 160), "#ccc")
     except:
-        pfp = Image.new("RGB", (180, 180), "#ccc")
+        pfp = Image.new("RGB", (160, 160), "#ccc")
 
-    # Apply circular mask
-    mask = Image.new("L", (180, 180), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 180, 180), fill=255)
-    bg.paste(pfp, (408, 512), mask)
+    # Mask and paste profile picture perfectly on the grey circle
+    mask = Image.new("L", (160, 160), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, 160, 160), fill=255)
+    pfp_x = (768 - 160) // 2  # center
+    pfp_y = 170               # visually aligns with grey circle in your template
+    bg.paste(pfp, (pfp_x, pfp_y), mask)
 
-    # Username text (drawn at fixed point)
-    draw.text((590, 512), username, font=bold_font, fill="#222")
+    # Username below profile picture
+    uname_y = pfp_y + 170
+    uname_x = (768 - draw.textlength(username, font=bold_font)) // 2
+    draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
 
-    # Stats below
+    # Stats: Views | Reels | Payout
     stats = [
         (format_millions(total_views), "VIEWS"),
         (str(total_reels), "REELS"),
         (f"${payout:,.2f}", "PAYOUT")
     ]
-    y_start = 570
-    for i, (val, label) in enumerate(stats):
-        draw.text((730, y_start + i * 60), val, font=bold_font, fill="#111")
-        draw.text((730, y_start + i * 60 + 30), label, font=small_font, fill="#666")
+    x_positions = [100, 310, 520]  # 3 columns
+    stats_y = uname_y + 70
 
-    # Save & send
+    for i, (val, label) in enumerate(stats):
+        draw.text((x_positions[i], stats_y), val, font=bold_font, fill="#111")
+        draw.text((x_positions[i], stats_y + 35), label, font=small_font, fill="#666")
+
+    # Save and send
     buffer = BytesIO()
     bg.save(buffer, format="PNG")
     buffer.seek(0)
     await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")
+
     
 @debug_handler
 async def slotdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
