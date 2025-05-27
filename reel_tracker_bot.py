@@ -2746,69 +2746,68 @@ async def remove_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def format_millions(n):
     return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
 
-@debug_handler
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
+    # Fetch user info from DB
     async with AsyncSessionLocal() as s:
         result = await s.execute(text("SELECT username, total_views FROM users WHERE user_id = :u"), {"u": user_id})
         row = result.first()
         if not row:
             return await update.message.reply_text("❌ User not found.")
+        
         username, total_views = row
         total_reels = (await s.execute(text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id})).scalar()
         payout = round((total_views / 1000) * 0.025, 2)
 
-    # Load base background
+    # Load 1024x1024 background
     bg = Image.open("template_profile_card.png").convert("RGB")
     draw = ImageDraw.Draw(bg)
 
-    # Fonts
+    # Load fonts (Linux-safe)
     bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
     small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32)
 
-    # PFP (160x160), centered
+    # Load profile photo
     try:
         photos = await context.bot.get_user_profile_photos(user_id, limit=1)
         if photos.total_count > 0:
             file = await context.bot.get_file(photos.photos[0][0].file_id)
-            img_data = requests.get(file.file_path).content
-            pfp = Image.open(BytesIO(img_data)).resize((160, 160)).convert("RGB")
+            pfp_data = requests.get(file.file_path).content
+            pfp = Image.open(BytesIO(pfp_data)).resize((160, 160)).convert("RGB")
         else:
             pfp = Image.new("RGB", (160, 160), "#ccc")
     except:
         pfp = Image.new("RGB", (160, 160), "#ccc")
 
+    # Paste circular PFP
     mask = Image.new("L", (160, 160), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, 160, 160), fill=255)
     pfp_x = (1024 - 160) // 2
-    pfp_y = 130
+    pfp_y = 180  # lowered
     bg.paste(pfp, (pfp_x, pfp_y), mask)
 
-    # Username centered below PFP
-    uname_y = pfp_y + 180
+    # Username (below PFP)
+    uname_y = pfp_y + 160 + 20
     uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
     draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
 
-    # Stats row — evenly spaced
+    # Stats: Views / Reels / Payout
     stats = [
         (format_millions(total_views), "VIEWS"),
         (str(total_reels), "REELS"),
         (f"${payout:,.2f}", "PAYOUT")
     ]
-
     x_positions = [160, 430, 700]
-    stats_y = 480
-
+    stats_y = 540
     for i, (val, label) in enumerate(stats):
         draw.text((x_positions[i], stats_y), val, font=bold_font, fill="#111")
         draw.text((x_positions[i], stats_y + 50), label, font=small_font, fill="#666")
 
-    # Save image to memory
+    # Save to memory and send
     buffer = BytesIO()
     bg.save(buffer, format="PNG")
     buffer.seek(0)
-
     await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")
 
 
