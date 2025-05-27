@@ -2728,22 +2728,6 @@ async def remove_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def format_millions(n):
     return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
 
-def get_creator_badge(total_views, total_reels, payout):
-    badges = []
-
-    if total_views > 1_000_000:
-        badges = ["Viral Visionary", "Reel Rockstar", "Content Legend"]
-    elif total_views > 100_000:
-        badges = ["Rising Creator", "Trendsetter", "Storyteller"]
-    elif total_reels > 500:
-        badges = ["Reel Machine", "Content Craftsman", "Film Artisan"]
-    elif payout > 100:
-        badges = ["Monetization Master", "Profit Pro", "Hustle Hero"]
-    else:
-        badges = ["Aspiring Creator", "Growing Talent", "Future Star"]
-
-    return random.choice(badges)
-
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -2790,10 +2774,35 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
     
     #quote badge
-    badge = get_creator_badge(total_views, total_reels, payout)
-    badge_y = uname_y + 100
-    badge_x = (1024 - draw.textlength(badge, font=small_font)) // 2
-    draw.text((badge_x, badge_y), badge, font=small_font, fill="#222")
+    badge_texts = [
+        "Top Creator", "Keep Creating", "Rising Star", "Content King",
+        "View Magnet", "Reel Master", "Creative Soul", "Inspire Daily",
+        "Engage More", "Watch Me Grow", "Trendsetter", "Viral Genius",
+        "Storyteller", "Next Big Thing", "Content Wizard", "Social Butterfly",
+        "Power Poster", "Daily Hustler", "Creative Beast", "Fan Favorite",
+        "Mastermind", "Audience Magnet", "Game Changer", "Hit Maker",
+        "Visionary", "Bold & Brave",
+    ]
+
+    # Pick 2 unique badges randomly
+    text1, text2 = random.sample(badge_texts, 2)
+    separator = " | "
+    full_text = text1 + separator + text2
+    total_width = draw.textlength(full_text, font=bold_font)
+    start_x = (1024 - total_width) // 2
+    badge_y = uname_y + 60  # position a bit below username
+
+    # Draw first badge
+    draw.text((start_x, badge_y), text1, font=bold_font, fill="#222")
+
+    # Draw separator
+    sep_x = start_x + draw.textlength(text1, font=bold_font)
+    draw.text((sep_x, badge_y), separator, font=bold_font, fill="#555")
+
+    # Draw second badge
+    text2_x = sep_x + draw.textlength(separator, font=bold_font)
+    draw.text((text2_x, badge_y), text2, font=bold_font, fill="#222")
+
 
     # ✅ Stats (keep as-is, just move down slightly)
     stats = [
