@@ -2786,7 +2786,7 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bg.paste(pfp, (pfp_x, pfp_y), mask)
 
     # ✅ Username - centered below PFP
-    uname_y = 600
+    uname_y = 580
     uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
     draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
 
