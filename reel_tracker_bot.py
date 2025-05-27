@@ -2782,22 +2782,22 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Apply circular mask and paste at exact center of grey circle
     mask = Image.new("L", (180, 180), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, 180, 180), fill=255)
-    pfp_x, pfp_y = 318, 422  # calculated from center (408, 512)
+    pfp_x, pfp_y = 318, 422  # Centered at (408, 512)
     bg.paste(pfp, (pfp_x, pfp_y), mask)
 
-    # Username under PFP
-    uname_y = pfp_y + 180 + 20  # 622
+    # ✅ Username - centered below PFP
+    uname_y = 620
     uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
     draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
 
-    # Stats row
+    # ✅ Stats (keep as-is, just move down slightly)
     stats = [
         (format_millions(total_views), "VIEWS"),
         (str(total_reels), "REELS"),
         (f"${payout:,.2f}", "PAYOUT")
     ]
-    stat_xs = [140, 408, 680]  # evenly spaced
-    stat_y = uname_y + 60
+    stat_xs = [160, 430, 700]
+    stat_y = 750  # previously ~700
 
     for i, (val, label) in enumerate(stats):
         draw.text((stat_xs[i], stat_y), val, font=bold_font, fill="#111")
