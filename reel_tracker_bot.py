@@ -2773,7 +2773,7 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if photos.total_count > 0:
             file = await context.bot.get_file(photos.photos[0][0].file_id)
             img_data = requests.get(file.file_path).content
-            pfp = Image.open(BytesIO(img_data)).resize((240, 240)).convert("RGB")
+            pfp = Image.open(BytesIO(img_data)).resize((250, 250)).convert("RGB")
         else:
             pfp = Image.new("RGB", (250, 250), "#ccc")
     except:
