@@ -2749,7 +2749,6 @@ def format_millions(n):
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    # Fetch user info
     async with AsyncSessionLocal() as s:
         result = await s.execute(text("SELECT username, total_views FROM users WHERE user_id = :u"), {"u": user_id})
         row = result.first()
@@ -2764,117 +2763,52 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bg = Image.open("template_profile_card.png").convert("RGB")
     draw = ImageDraw.Draw(bg)
 
-    # Fonts (Linux safe)
-    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
-    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32)
+    # Fonts
+    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 42)
+    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
 
-    # Load PFP
+    # Load PFP (smaller to fit)
     try:
         photos = await context.bot.get_user_profile_photos(user_id, limit=1)
         if photos.total_count > 0:
             file = await context.bot.get_file(photos.photos[0][0].file_id)
             pfp_data = requests.get(file.file_path).content
-            pfp = Image.open(BytesIO(pfp_data)).resize((220, 220)).convert("RGB")
+            pfp = Image.open(BytesIO(pfp_data)).resize((140, 140)).convert("RGB")
         else:
-            pfp = Image.new("RGB", (220, 220), "#ccc")
+            pfp = Image.new("RGB", (140, 140), "#ccc")
     except:
-        pfp = Image.new("RGB", (220, 220), "#ccc")
+        pfp = Image.new("RGB", (140, 140), "#ccc")
 
-    # Paste PFP (centered, low)
-    mask = Image.new("L", (220, 220), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 220, 220), fill=255)
-    pfp_x = (1024 - 220) // 2
-    pfp_y = 640
+    # Paste PFP very low
+    mask = Image.new("L", (140, 140), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, 140, 140), fill=255)
+    pfp_x = (1024 - 140) // 2
+    pfp_y = 770
     bg.paste(pfp, (pfp_x, pfp_y), mask)
 
-    # Username below PFP
-    uname_y = pfp_y + 220 + 20  # ~880
+    # Username just below PFP
+    uname_y = pfp_y + 140 + 10  # 770+140+10 = 920
     uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
     draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
 
-    # Stats row (bottom)
+    # Stats row at very bottom
     stats = [
         (format_millions(total_views), "VIEWS"),
         (str(total_reels), "REELS"),
         (f"${payout:,.2f}", "PAYOUT")
     ]
-    x_positions = [160, 430, 700]
-    stats_y = 940
+    x_positions = [170, 440, 710]
+    stats_y = 990
 
     for i, (val, label) in enumerate(stats):
-        draw.text((x_positions[i], stats_y), val, font=bold_font, fill="#111")
-        draw.text((x_positions[i], stats_y + 50), label, font=small_font, fill="#666")
+        draw.text((x_positions[i], stats_y), val, font=small_font, fill="#111")
+        draw.text((x_positions[i], stats_y + 30), label, font=small_font, fill="#666")
 
-    # Send image
+    # Send
     buffer = BytesIO()
     bg.save(buffer, format="PNG")
     buffer.seek(0)
     await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")
-
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    # Fetch user info from DB
-    async with AsyncSessionLocal() as s:
-        result = await s.execute(text("SELECT username, total_views FROM users WHERE user_id = :u"), {"u": user_id})
-        row = result.first()
-        if not row:
-            return await update.message.reply_text("❌ User not found.")
-        
-        username, total_views = row
-        total_reels = (await s.execute(text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id})).scalar()
-        payout = round((total_views / 1000) * 0.025, 2)
-
-    # Load 1024x1024 background
-    bg = Image.open("template_profile_card.png").convert("RGB")
-    draw = ImageDraw.Draw(bg)
-
-    # Load fonts (Linux-safe)
-    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
-    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32)
-
-    # Load profile photo
-    try:
-        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
-        if photos.total_count > 0:
-            file = await context.bot.get_file(photos.photos[0][0].file_id)
-            pfp_data = requests.get(file.file_path).content
-            pfp = Image.open(BytesIO(pfp_data)).resize((160, 160)).convert("RGB")
-        else:
-            pfp = Image.new("RGB", (160, 160), "#ccc")
-    except:
-        pfp = Image.new("RGB", (160, 160), "#ccc")
-
-    # Paste circular PFP
-    mask = Image.new("L", (160, 160), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 160, 160), fill=255)
-    pfp_x = (1024 - 160) // 2
-    pfp_y = 180  # lowered
-    bg.paste(pfp, (pfp_x, pfp_y), mask)
-
-    # Username (below PFP)
-    uname_y = pfp_y + 160 + 20
-    uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
-    draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
-
-    # Stats: Views / Reels / Payout
-    stats = [
-        (format_millions(total_views), "VIEWS"),
-        (str(total_reels), "REELS"),
-        (f"${payout:,.2f}", "PAYOUT")
-    ]
-    x_positions = [160, 430, 700]
-    stats_y = 540
-    for i, (val, label) in enumerate(stats):
-        draw.text((x_positions[i], stats_y), val, font=bold_font, fill="#111")
-        draw.text((x_positions[i], stats_y + 50), label, font=small_font, fill="#666")
-
-    # Save to memory and send
-    buffer = BytesIO()
-    bg.save(buffer, format="PNG")
-    buffer.seek(0)
-    await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")
-
 
 @debug_handler
 async def slotdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
