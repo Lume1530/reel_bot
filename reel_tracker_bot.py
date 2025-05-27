@@ -2780,8 +2780,8 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pfp = Image.new("RGB", (180, 180), "#ccc")
 
     # Apply circular mask and paste at exact center of grey circle
-    mask = Image.new("L", (220, 220), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 220, 220), fill=255)
+    mask = Image.new("L", (180, 180), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, 180, 180), fill=255)
     pfp_x, pfp_y = 290, 480  # Centered at (408, 512)
     bg.paste(pfp, (pfp_x, pfp_y), mask)
 
