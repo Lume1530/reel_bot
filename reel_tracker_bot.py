@@ -2748,76 +2748,72 @@ import requests
 from io import BytesIO
 
 def format_millions(n):
-    return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{n/1_000:.0f}K"
+    return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
 
 @debug_handler
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     async with AsyncSessionLocal() as s:
-        result = await s.execute(text("""
-            SELECT username, total_views FROM users WHERE user_id = :u
-        """), {"u": user_id})
+        result = await s.execute(text("SELECT username, total_views FROM users WHERE user_id = :u"), {"u": user_id})
         row = result.first()
         if not row:
             return await update.message.reply_text("❌ User not found.")
-        
         username, total_views = row
         total_reels = (await s.execute(text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id})).scalar()
         payout = round((total_views / 1000) * 0.025, 2)
-    # Load background image
-    with open("template_profile_card.png", "rb") as f:
-        bg = Image.open(f).convert("RGB")
 
+    # Load base background
+    bg = Image.open("template_profile_card.png").convert("RGB")
     draw = ImageDraw.Draw(bg)
 
-    # Load profile picture
+    # Fonts
+    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+
+    # Load & center circular PFP
     try:
         photos = await context.bot.get_user_profile_photos(user_id, limit=1)
         if photos.total_count > 0:
             file = await context.bot.get_file(photos.photos[0][0].file_id)
-            pfp_data = requests.get(file.file_path).content
-            pfp = Image.open(BytesIO(pfp_data)).resize((120, 120)).convert("RGB")
+            img_data = requests.get(file.file_path).content
+            pfp = Image.open(BytesIO(img_data)).resize((120, 120)).convert("RGB")
         else:
             pfp = Image.new("RGB", (120, 120), "#ccc")
     except:
         pfp = Image.new("RGB", (120, 120), "#ccc")
 
-    # Paste circular PFP
     mask = Image.new("L", (120, 120), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, 120, 120), fill=255)
-    bg.paste(pfp, (240, 110), mask)
+    pfp_x = (bg.width - 120) // 2
+    bg.paste(pfp, (pfp_x, 100), mask)
 
-    # Use Linux-safe fonts
-    bold_font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    regular_font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    font_bold = ImageFont.truetype(bold_font_path, 28)
-    font_small = ImageFont.truetype(regular_font_path, 22)
+    # Username below profile pic
+    uname_text = username
+    uname_x = (bg.width - draw.textlength(uname_text, font=bold_font)) // 2
+    draw.text((uname_x, 235), uname_text, font=bold_font, fill="#222")
 
-    # Name text
-    draw.text((bg.width//2 - draw.textlength(username, font=font_bold)//2, 250), username, font=font_bold, fill="#222")
-
-    # Stats layout
+    # Stats row — centered horizontally
     stats = [
         (format_millions(total_views), "VIEWS"),
         (str(total_reels), "REELS"),
-        (f"₹{payout:,}", "PAYOUT")
+        (f"${payout:,.2f}", "PAYOUT")
     ]
+    spacing = 180
+    x_start = 60
+    y_top = 300
 
-    start_x = 75
-    spacing = 160
-    y_top = 310
+    for i, (val, label) in enumerate(stats):
+        x = x_start + i * spacing
+        draw.text((x, y_top), val, font=bold_font, fill="#111")
+        draw.text((x, y_top + 30), label, font=small_font, fill="#777")
 
-    for i, (value, label) in enumerate(stats):
-        x = start_x + i * spacing
-        draw.text((x, y_top), value, font=font_bold, fill="#111")
-        draw.text((x, y_top + 35), label, font=font_small, fill="#555")
+    # Output as image
+    buffer = BytesIO()
+    bg.save(buffer, format="PNG")
+    buffer.seek(0)
+    await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")
 
-    # Output
-    output = BytesIO()
-    bg.save(output, format="PNG")
-    output.seek(0)
-    await update.message.reply_photo(photo=output, caption="📇 Your Creator Profile Card")
 
 @debug_handler
 async def slotdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
