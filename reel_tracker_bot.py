@@ -2741,9 +2741,8 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_reels = (await s.execute(text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id})).scalar()
         payout = round((total_views / 1000) * 0.025, 2)
 
-    import random
 
-def get_creator_badge(total_views, total_reels, payout):
+    def get_creator_badge(total_views, total_reels, payout):
     badges = []
 
     if total_views > 1_000_000:
