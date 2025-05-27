@@ -2166,37 +2166,51 @@ async def slotstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @debug_handler
 async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generate a private campaign leaderboard image with Telegram names and total views."""
+    import os
+    import io
+    from PIL import Image, ImageDraw, ImageFont
+
     if not await is_admin(update.effective_user.id):
         return await update.message.reply_text("🚫 Unauthorized")
-    
-    from PIL import Image, ImageDraw, ImageFont
-    import io
 
-    # Load new background
-    bg_path = "private_leaderboard_bg.png"
+    # Colors
+    red = (220, 38, 54)
+    white = (255, 255, 255)
+
+    # Load background image
+    bg_path = os.getenv("LEADERBOARD_BG_PATH", "private_leaderboard_bg.png")
     try:
         bg = Image.open(bg_path).convert("RGBA")
     except Exception as e:
         return await update.message.reply_text(f"❌ Could not load leaderboard background: {e}")
 
-    # Colors from reference
-    red = (220, 38, 54)
-    white = (255, 255, 255)
-    black = (0, 0, 0)
-
-    # Fonts (use DejaVu Sans for Linux compatibility)
+    # Load fonts
     try:
         font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 48)
         font_box = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
         font_views = ImageFont.truetype("DejaVuSans.ttf", 22)
-    except:
-        font_title = ImageFont.load_default()
-        font_box = ImageFont.load_default()
-        font_views = ImageFont.load_default()
+    except Exception as e:
+        logger.warning(f"Font load failed: {e}")
+        font_title = font_box = font_views = ImageFont.load_default()
 
+    # Helper: draw text with shadow
+    def draw_text_with_shadow(draw, position, text, font, fill, shadow_color=(0, 0, 0)):
+        x, y = position
+        draw.text((x + 1, y + 1), text, font=font, fill=shadow_color)
+        draw.text((x, y), text, font=font, fill=fill)
+
+    # Helper: censor username
+    def censor_username(uname, user_id):
+        if uname and len(uname) > 5:
+            return f"{uname[:2]}{'*' * (len(uname) - 4)}{uname[-2:]}"
+        elif uname:
+            return f"{uname[0]}***{uname[-1]}"
+        else:
+            return str(user_id)
+
+    # Fetch leaderboard data
     async with AsyncSessionLocal() as s:
-        # Get all creators by views
-        creators = (await s.execute(text("""
+        result = await s.execute(text("""
             SELECT 
                 u.user_id,
                 u.username,
@@ -2204,90 +2218,83 @@ async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
             FROM users u
             WHERE u.total_views > 0
             ORDER BY u.total_views DESC
-        """))).fetchall()
-        if not creators:
-            return await update.message.reply_text("No creator statistics available.")
+        """))
+        creators = result.fetchall()
 
-        leaderboard = []
-        for user_id, username, views in creators:
-            # Try to get Telegram username
-            try:
-                chat = await context.bot.get_chat(user_id)
-                if chat.username:
-                    uname = chat.username
-                    name = uname
-                else:
-                    name = str(user_id)
-                    uname = None
-            except Exception:
-                name = str(user_id)
-                uname = None
-            # Censor username: show first 2 and last 2 chars, rest as * (no @)
-            if uname and len(uname) > 5:
-                censored = f"{uname[:2]}{'*' * (len(uname) - 4)}{uname[-2:]}"
-            else:
-                censored = name
-            leaderboard.append({
-                "name": censored,
-                "views": int(views)
-            })
+    if not creators:
+        return await update.message.reply_text("No creator statistics available.")
 
-        # Grid settings (from reference)
-        cols = 6
-        box_w, box_h = 210, 70
-        pad_x, pad_y = 20, 18
-        margin_x, margin_y = 30, 180  # left/top margin for first box
-        spacing_x, spacing_y = 18, 18
-        # Calculate rows needed
-        rows = (len(leaderboard) + cols - 1) // cols
-        # Calculate image height
-        base_height = bg.height
-        needed_height = margin_y + rows * (box_h + spacing_y) + 30
-        img_height = max(base_height, needed_height)
-        img = Image.new("RGBA", (bg.width, img_height), (0, 0, 0, 255))
-        img.paste(bg, (0, 0))
-        draw = ImageDraw.Draw(img)
+    leaderboard = []
+    for user_id, username, views in creators:
+        try:
+            chat = await context.bot.get_chat(user_id)
+            uname = chat.username
+        except Exception as e:
+            logger.warning(f"Failed to get chat for {user_id}: {e}")
+            uname = None
+        censored = censor_username(uname, user_id)
+        leaderboard.append({
+            "rank": len(leaderboard) + 1,
+            "name": censored,
+            "views": int(views)
+        })
 
-        # Draw leaderboard title (centered, white, bold)
-        title = "Leaderboard for\nprivate Campaign"
-        bbox = draw.multiline_textbbox((0, 0), title, font=font_title, spacing=0)
-        title_w = bbox[2] - bbox[0]
-        title_h = bbox[3] - bbox[1]
-        draw.multiline_text(
-            ((img.width - title_w) // 2, 30),
-            title,
-            font=font_title,
-            fill=white,
-            align="center"
-        )
+    # Layout
+    cols = 6
+    box_w, box_h = 210, 70
+    pad_x, pad_y = 20, 18
+    margin_x, margin_y = 30, 180
+    spacing_x, spacing_y = 18, 18
+    rows = (len(leaderboard) + cols - 1) // cols
 
-        # Draw each user in a red rounded rectangle
-        for idx, entry in enumerate(leaderboard):
-            row = idx // cols
-            col = idx % cols
-            x = margin_x + col * (box_w + spacing_x)
-            y = margin_y + row * (box_h + spacing_y)
-            # Draw rounded rectangle
-            draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=15, fill=red)
-            # Draw rank, name, views (white)
-            rank_str = f"{idx+1}."
-            name_str = entry["name"]
-            views_str = f"{entry['views']:,} views"
-            # Rank + name (bold)
-            draw.text((x + pad_x, y + 8), f"{rank_str} {name_str}", font=font_box, fill=white)
-            # Views (smaller, white)
-            draw.text((x + pad_x, y + 38), views_str, font=font_views, fill=white)
+    base_height = bg.height
+    needed_height = margin_y + rows * (box_h + spacing_y) + 30
+    img_height = max(base_height, needed_height)
+    img = Image.new("RGBA", (bg.width, img_height), (0, 0, 0, 255))
+    img.paste(bg, (0, 0))
+    draw = ImageDraw.Draw(img)
 
-        # Save image to bytes
-        img_byte_arr = io.BytesIO()
-        img = img.convert("RGB")
-        img.save(img_byte_arr, format='JPEG', quality=95)
-        img_byte_arr.seek(0)
+    # Draw title
+    title = "Leaderboard for\nprivate Campaign"
+    bbox = draw.multiline_textbbox((0, 0), title, font=font_title, spacing=0)
+    title_w = bbox[2] - bbox[0]
+    draw.multiline_text(
+        ((img.width - title_w) // 2, 30),
+        title,
+        font=font_title,
+        fill=white,
+        align="center"
+    )
 
-        await update.message.reply_photo(
-            photo=img_byte_arr,
-            caption="🏆 Private Campaign Leaderboard"
-        )
+    # Draw each user box
+    for entry in leaderboard:
+        idx = entry["rank"] - 1
+        row = idx // cols
+        col = idx % cols
+        x = margin_x + col * (box_w + spacing_x)
+        y = margin_y + row * (box_h + spacing_y)
+
+        draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=15, fill=red)
+
+        # Text content
+        rank_str = f"{entry['rank']}."
+        name_str = entry["name"]
+        views_str = f"{entry['views']:,} views"
+
+        # Draw rank + name
+        draw_text_with_shadow(draw, (x + pad_x, y + 8), f"{rank_str} {name_str}", font_box, white)
+        # Draw views
+        draw_text_with_shadow(draw, (x + pad_x, y + 38), views_str, font_views, white)
+
+    # Convert to JPEG and send
+    img_byte_arr = io.BytesIO()
+    img.convert("RGB").save(img_byte_arr, format='JPEG', quality=95)
+    img_byte_arr.seek(0)
+
+    await update.message.reply_photo(
+        photo=img_byte_arr,
+        caption="🏆 Private Campaign Leaderboard"
+    )
 
 # Add config table for minimum date
 async def ensure_config_table():
