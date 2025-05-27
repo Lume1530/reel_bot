@@ -2788,20 +2788,20 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text1, text2 = random.sample(badge_texts, 2)
     separator = " | "
     full_text = text1 + separator + text2
-    total_width = draw.textlength(full_text, font=bold_font)
+    total_width = draw.textlength(full_text, font=small_font)
     start_x = (1024 - total_width) // 2
     badge_y = uname_y + 60  # position a bit below username
 
     # Draw first badge
-    draw.text((start_x, badge_y), text1, font=bold_font, fill="#222")
+    draw.text((start_x, badge_y), text1, font=small_font, fill="#222")
 
     # Draw separator
-    sep_x = start_x + draw.textlength(text1, font=bold_font)
-    draw.text((sep_x, badge_y), separator, font=bold_font, fill="#555")
+    sep_x = start_x + draw.textlength(text1, font=small_font)
+    draw.text((sep_x, badge_y), separator, font=small_font, fill="#555")
 
     # Draw second badge
-    text2_x = sep_x + draw.textlength(separator, font=bold_font)
-    draw.text((text2_x, badge_y), text2, font=bold_font, fill="#222")
+    text2_x = sep_x + draw.textlength(separator, font=small_font)
+    draw.text((text2_x, badge_y), text2, font=small_font, fill="#222")
 
 
     # ✅ Stats (keep as-is, just move down slightly)
