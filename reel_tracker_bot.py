@@ -2173,13 +2173,13 @@ async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import io
     from PIL import Image, ImageDraw, ImageFont
 
-    # Layout
-    cols = 6
-    box_w, box_h = 210, 70
+    # Leaderboard layout
+    cols = 5
+    box_w, box_h = 240, 80
     pad_x, pad_y = 20, 18
-    spacing_x, spacing_y = 18, 18
-    margin_top = 150
-    margin_side = 30
+    spacing_x, spacing_y = 20, 20
+    margin_top = 160
+    margin_side = 40
 
     # Load leaderboard data
     async with AsyncSessionLocal() as s:
@@ -2193,20 +2193,13 @@ async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not creators:
         return await update.message.reply_text("No creator statistics available.")
 
-    # Format helpers
-    def format_views(v: int) -> str:
-        if v >= 1_000_000:
-            return f"{v / 1_000_000:.1f}M"
-        elif v >= 1_000:
-            return f"{v / 1_000:.1f}K"
-        return str(v)
-
-    def truncate_name(name: str, draw: ImageDraw.ImageDraw, max_width: int, font) -> str:
-        if draw.textlength(name, font=font) <= max_width:
-            return name
-        while draw.textlength(name + "…", font=font) > max_width and len(name) > 1:
-            name = name[:-1]
-        return name + "…"
+    # Format views and fetch names
+    def format_views(views):
+        if views >= 1_000_000:
+            return f"{views/1_000_000:.1f}M"
+        elif views >= 1_000:
+            return f"{views/1_000:.1f}K"
+        return str(views)
 
     leaderboard = []
     for user_id, _, views in creators:
@@ -2215,22 +2208,26 @@ async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name = chat.first_name or str(user_id)
         except:
             name = str(user_id)
+        # Truncate name if too long
+        name = name.strip()
+        if len(name) > 12:
+            name = name[:11] + "…"
         leaderboard.append({
             "name": name,
-            "views": int(views)
+            "views": format_views(int(views))
         })
 
     rows = (len(leaderboard) + cols - 1) // cols
-    img_width = margin_side * 2 + cols * box_w + (cols - 1) * spacing_x
-    img_height = margin_top + rows * box_h + (rows - 1) * spacing_y + 50
 
-    img = Image.new("RGBA", (img_width, img_height), (0, 0, 0, 255))
+    # Canvas size
+    img_width = margin_side * 2 + cols * box_w + (cols - 1) * spacing_x
+    img_height = margin_top + rows * box_h + (rows - 1) * spacing_y + 60
+
+    # Create image
+    img = Image.new("RGBA", (img_width, img_height), (20, 20, 25, 255))  # dark grey background
     draw = ImageDraw.Draw(img)
 
-    # Colors & Fonts
-    red = (220, 38, 54)
-    white = (255, 255, 255)
-
+    # Fonts
     try:
         font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 48)
         font_box = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
@@ -2246,26 +2243,24 @@ async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ((img_width - title_w) // 2, 30),
         title,
         font=font_title,
-        fill=white,
+        fill=(255, 255, 255),
         align="center"
     )
 
-    # Draw leaderboard
+    red = (220, 38, 54)
+    white = (255, 255, 255)
+
+    # Draw boxes
     for idx, entry in enumerate(leaderboard):
         row = idx // cols
         col = idx % cols
         x = margin_side + col * (box_w + spacing_x)
         y = margin_top + row * (box_h + spacing_y)
-        draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=15, fill=red)
+        draw.rounded_rectangle([x, y, x + box_w, y + box_h], radius=18, fill=red)
+        draw.text((x + pad_x, y + 10), f"{idx+1}. {entry['name']}", font=font_box, fill=white)
+        draw.text((x + pad_x, y + 44), f"{entry['views']} views", font=font_views, fill=white)
 
-        max_name_width = box_w - 2 * pad_x - 30
-        name = truncate_name(f"{idx+1}. {entry['name']}", draw, max_name_width, font_box)
-        views_str = format_views(entry['views']) + " views"
-
-        draw.text((x + pad_x, y + 8), name, font=font_box, fill=white)
-        draw.text((x + pad_x, y + 38), views_str, font=font_views, fill=white)
-
-    # Export
+    # Export image
     img_byte_arr = io.BytesIO()
     img.convert("RGB").save(img_byte_arr, format='JPEG', quality=95)
     img_byte_arr.seek(0)
