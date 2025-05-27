@@ -2809,8 +2809,7 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buffer = BytesIO()
     bg.save(buffer, format="PNG")
     buffer.seek(0)
-    await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")ef format_millions(n):
-    return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
+    await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")
 
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
