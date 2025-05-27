@@ -2210,8 +2210,8 @@ async def lbpng(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name = str(user_id)
         # Truncate name if too long
         name = name.strip()
-        if len(name) > 12:
-            name = name[:11] + "…"
+        if len(name) > 9:
+            name = name[:8] + "…"
         leaderboard.append({
             "name": name,
             "views": format_views(int(views))
