@@ -2764,10 +2764,10 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     draw = ImageDraw.Draw(bg)
 
     # Fonts
-    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 44)
-    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
+    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 42)
+    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
 
-    # Load and paste profile photo
+    # Load and paste circular PFP
     try:
         photos = await context.bot.get_user_profile_photos(user_id, limit=1)
         if photos.total_count > 0:
@@ -2779,32 +2779,26 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pfp = Image.new("RGB", (180, 180), "#ccc")
 
-    # PFP
+    # Apply circular mask
     mask = Image.new("L", (180, 180), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, 180, 180), fill=255)
-    pfp_x = (1024 - 180) // 2
-    pfp_y = 620  # balanced
-    bg.paste(pfp, (pfp_x, pfp_y), mask)
+    bg.paste(pfp, (408, 512), mask)
 
-    # Username
-    uname_y = pfp_y + 180 + 10  # 810
-    uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
-    draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
+    # Username text (drawn at fixed point)
+    draw.text((590, 512), username, font=bold_font, fill="#222")
 
-    # Stats
+    # Stats below
     stats = [
         (format_millions(total_views), "VIEWS"),
         (str(total_reels), "REELS"),
         (f"${payout:,.2f}", "PAYOUT")
     ]
-    x_positions = [160, 430, 700]
-    stats_y = 880
-
+    y_start = 570
     for i, (val, label) in enumerate(stats):
-        draw.text((x_positions[i], stats_y), val, font=bold_font, fill="#111")
-        draw.text((x_positions[i], stats_y + 40), label, font=small_font, fill="#666")
+        draw.text((730, y_start + i * 60), val, font=bold_font, fill="#111")
+        draw.text((730, y_start + i * 60 + 30), label, font=small_font, fill="#666")
 
-    # Send image
+    # Save & send
     buffer = BytesIO()
     bg.save(buffer, format="PNG")
     buffer.seek(0)
