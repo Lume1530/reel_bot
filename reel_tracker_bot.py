@@ -2773,16 +2773,16 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if photos.total_count > 0:
             file = await context.bot.get_file(photos.photos[0][0].file_id)
             img_data = requests.get(file.file_path).content
-            pfp = Image.open(BytesIO(img_data)).resize((220, 220)).convert("RGB")
+            pfp = Image.open(BytesIO(img_data)).resize((240, 240)).convert("RGB")
         else:
-            pfp = Image.new("RGB", (220, 220), "#ccc")
+            pfp = Image.new("RGB", (240, 240), "#ccc")
     except:
-        pfp = Image.new("RGB", (220, 220), "#ccc")
+        pfp = Image.new("RGB", (240, 240), "#ccc")
 
     # Apply circular mask and paste at exact center of grey circle
-    mask = Image.new("L", (220, 220), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 220, 220), fill=255)
-    pfp_x, pfp_y = 420, 300  # Centered at (408, 512)
+    mask = Image.new("L", (240, 240), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, 240, 240), fill=255)
+    pfp_x, pfp_y = 420, 320  # Centered at (408, 512)
     bg.paste(pfp, (pfp_x, pfp_y), mask)
 
     # ✅ Username - centered below PFP
