@@ -1869,6 +1869,47 @@ async def clearbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text("\n".join(msg))
 
+
+@debug_handler
+async def removeviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove views from a user's total"""
+    if not await is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Unauthorized")
+    
+    if len(context.args) != 2:
+        return await update.message.reply_text("Usage: /removeviews <user_id> <views>")
+    
+    try:
+        user_id = int(context.args[0])
+        views_to_remove = int(context.args[1])
+        
+        async with AsyncSessionLocal() as s:
+            current = await s.execute(text("SELECT total_views FROM users WHERE user_id = :u"), {"u": user_id})
+            row = current.fetchone()
+            if not row:
+                return await update.message.reply_text("❌ User not found in database")
+            
+            current_views = row[0] or 0
+            new_total = max(0, current_views - views_to_remove)
+            
+            await s.execute(
+                text("UPDATE users SET total_views = :v WHERE user_id = :u"),
+                {"v": new_total, "u": user_id}
+            )
+            await s.commit()
+
+            # Try to get Telegram username
+            try:
+                chat = await context.bot.get_chat(user_id)
+                user_name = chat.username or str(user_id)
+            except:
+                user_name = str(user_id)
+
+            await update.message.reply_text(f"🗑️ Removed {views_to_remove:,} views from @{user_name}\nNew total: {new_total:,}")
+    
+    except ValueError:
+        await update.message.reply_text("❌ Invalid input. Please use valid numbers.")
+
 @debug_handler
 async def addslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add Instagram handles to a slot"""
@@ -2847,6 +2888,7 @@ async def run_bot():
         ("setmindate", setmindate), 
         ("getmindate", getmindate),
         ("referral", referral), 
+        ("removeviews", removeviews),
         ("referralstats", referralstats),
         ("setcommission", setcommission), 
         ("getcommission", getcommission),
