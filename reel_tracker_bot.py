@@ -2743,7 +2743,7 @@ async def remove_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ UPI address has been removed.")
 
 #Profile
-ddef format_millions(n):
+def format_millions(n):
     return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
 
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
