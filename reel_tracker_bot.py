@@ -2773,14 +2773,14 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if photos.total_count > 0:
             file = await context.bot.get_file(photos.photos[0][0].file_id)
             img_data = requests.get(file.file_path).content
-            pfp = Image.open(BytesIO(img_data)).resize((180, 180)).convert("RGB")
+            pfp = Image.open(BytesIO(img_data)).resize((220, 220)).convert("RGB")
         else:
             pfp = Image.new("RGB", (180, 180), "#ccc")
     except:
         pfp = Image.new("RGB", (180, 180), "#ccc")
 
     # Apply circular mask and paste at exact center of grey circle
-    mask = Image.new("L", (220, 220), 0)
+    mask = Image.new("L", (180, 180), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, 180, 180), fill=255)
     pfp_x, pfp_y = 420, 300  # Centered at (408, 512)
     bg.paste(pfp, (pfp_x, pfp_y), mask)
