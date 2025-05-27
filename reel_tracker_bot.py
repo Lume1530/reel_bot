@@ -2782,7 +2782,7 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Apply circular mask and paste at exact center of grey circle
     mask = Image.new("L", (250, 250), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, 250, 250), fill=255)
-    pfp_x, pfp_y = 390, 280  # Centered at (408, 512)
+    pfp_x, pfp_y = 388, 280  # Centered at (408, 512)
     bg.paste(pfp, (pfp_x, pfp_y), mask)
 
     # ✅ Username - centered below PFP
