@@ -2743,7 +2743,73 @@ async def remove_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ UPI address has been removed.")
 
 #Profile
-def format_millions(n):
+ddef format_millions(n):
+    return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    # Fetch user info
+    async with AsyncSessionLocal() as s:
+        result = await s.execute(text("SELECT username, total_views FROM users WHERE user_id = :u"), {"u": user_id})
+        row = result.first()
+        if not row:
+            return await update.message.reply_text("❌ User not found.")
+        
+        username, total_views = row
+        total_reels = (await s.execute(text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id})).scalar()
+        payout = round((total_views / 1000) * 0.025, 2)
+
+    # Load background image
+    bg = Image.open("template_profile_card.png").convert("RGB")
+    draw = ImageDraw.Draw(bg)
+
+    # Fonts (Linux safe)
+    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32)
+
+    # Load PFP
+    try:
+        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
+        if photos.total_count > 0:
+            file = await context.bot.get_file(photos.photos[0][0].file_id)
+            pfp_data = requests.get(file.file_path).content
+            pfp = Image.open(BytesIO(pfp_data)).resize((220, 220)).convert("RGB")
+        else:
+            pfp = Image.new("RGB", (220, 220), "#ccc")
+    except:
+        pfp = Image.new("RGB", (220, 220), "#ccc")
+
+    # Paste PFP (centered, low)
+    mask = Image.new("L", (220, 220), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, 220, 220), fill=255)
+    pfp_x = (1024 - 220) // 2
+    pfp_y = 640
+    bg.paste(pfp, (pfp_x, pfp_y), mask)
+
+    # Username below PFP
+    uname_y = pfp_y + 220 + 20  # ~880
+    uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
+    draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
+
+    # Stats row (bottom)
+    stats = [
+        (format_millions(total_views), "VIEWS"),
+        (str(total_reels), "REELS"),
+        (f"${payout:,.2f}", "PAYOUT")
+    ]
+    x_positions = [160, 430, 700]
+    stats_y = 940
+
+    for i, (val, label) in enumerate(stats):
+        draw.text((x_positions[i], stats_y), val, font=bold_font, fill="#111")
+        draw.text((x_positions[i], stats_y + 50), label, font=small_font, fill="#666")
+
+    # Send image
+    buffer = BytesIO()
+    bg.save(buffer, format="PNG")
+    buffer.seek(0)
+    await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")ef format_millions(n):
     return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
 
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
