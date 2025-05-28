@@ -2775,8 +2775,8 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     #quote badge
     badge_texts = [
-        "Top Creator", "Keep Creating", "Rising Star", "Content King",
-        "View Magnet", "Reel Master", "Creative Soul", "Inspire Daily",
+        "Top Creator", "Content Emperor", "Rising Star", "Content King",
+        "View Magnet", "Reel Master", "Reel Master", "Aura Farmer",
         "Engage More", "Watch Me Grow", "Trendsetter", "Viral Genius",
         "Storyteller", "Next Big Thing", "Content Wizard", "Social Butterfly",
         "Power Poster", "Daily Hustler", "Creative Beast", "Fan Favorite",
