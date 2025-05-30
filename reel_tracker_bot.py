@@ -801,7 +801,7 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 *Submissions are currently paused.*\nPlease wait for further announcements.",
         parse_mode="Markdown"
     )
-/*
+'''    
 async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import time
     from datetime import datetime
@@ -912,7 +912,7 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 results.append(f"❌ Error: {link} ({str(e)})")
         await s.commit()
     await update.message.reply_text("\n".join(results))
-    */
+    '''
 
 @debug_handler
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
