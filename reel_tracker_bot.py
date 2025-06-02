@@ -2731,6 +2731,77 @@ async def remove_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text("✅ UPI address has been removed.")
 
+
+#Invoice
+def calculate_net_payout(gross):
+    tax_rate = 0.048 + 0.04 + 0.032
+    return round(gross * (1 - tax_rate), 2)
+
+async def invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await update.message.reply_text("Usage: /invoice <user_id>")
+
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        return await update.message.reply_text("❌ Invalid user ID.")
+
+    # Get user data
+    async with AsyncSessionLocal() as s:
+        result = await s.execute(text("SELECT username, total_views FROM users WHERE user_id = :u"), {"u": user_id})
+        row = result.first()
+        if not row:
+            return await update.message.reply_text("❌ User not found.")
+        
+        username, total_views = row
+        gross_payout = round((total_views / 1000) * 0.025, 2)
+        net_payout = calculate_net_payout(gross_payout)
+        today = datetime.now().strftime("%b %d, %Y")
+        invoice_id = f"INV-{user_id}-{datetime.now().strftime('%m%y')}"
+
+    # Load invoice image template
+    bg = Image.open("invoice_template.jpg").convert("RGB")
+    draw = ImageDraw.Draw(bg)
+
+    # Fonts (adjust size as needed)
+    bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
+    regular = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+    small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+
+    # ----- Fill dynamic fields -----
+
+    # Invoice ID
+    draw.text((750, 160), invoice_id, font=small, fill="#000")
+
+    # Invoice To
+    draw.text((170, 260), f"@{username}", font=regular, fill="#000")
+
+    # Views
+    draw.text((600, 445), f"{total_views:,}", font=regular, fill="#000")  # Right of "Views"
+    draw.text((740, 445), f"${gross_payout:,.2f}", font=regular, fill="#000")  # Right of "Total"
+
+    # Deductions (we just write percent)
+    draw.text((600, 510), "-4.8%", font=regular, fill="#000")
+    draw.text((600, 570), "-4%", font=regular, fill="#000")
+    draw.text((600, 630), "-3.2%", font=regular, fill="#000")
+
+    # Sub-total (same as gross)
+    draw.text((740, 705), f"${gross_payout:,.2f}", font=bold, fill="#000")
+
+    # Tax label (optional static)
+    draw.text((640, 755), "-12%", font=regular, fill="#000")
+
+    # Final total
+    draw.text((740, 800), f"${net_payout:,.2f}", font=bold, fill="#000")
+
+    # Save to buffer
+    buffer = BytesIO()
+    bg.save(buffer, format="JPEG")
+    buffer.seek(0)
+
+    # Send back
+    await update.message.reply_photo(photo=buffer, caption=f"🧾 Invoice for @{username}")
+
 #Profile
 def format_millions(n):
     return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
@@ -2957,6 +3028,7 @@ async def run_bot():
         ("creatorstats", creatorstats),
         ("broadcast", broadcast), 
         ("export", export), 
+        ("invoice", invoice),
         ("addusdt", add_usdt), 
         ("userinfo", userinfo),
         ("currentaccounts", currentaccounts),
