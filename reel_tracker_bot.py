@@ -2780,10 +2780,10 @@ async def invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Fill the template
     draw.text((1076, 315), invoice_id, font=small, fill="#000")                    # Invoice ID
     draw.text((160, 520), f"@{username}", font=regular, fill="#000")              # Username
-    draw.text((915, 830), format_views(total_views), font=regular, fill="#000")   # Views
-    draw.text((880, 1330), f"${gross_payout:,.2f}", font=bold, fill="#000")        # Subtotal
-    draw.text((880, 1380), f"${tax:,.2f}", font=regular, fill="#000")              # Tax (12%)
-    draw.text((880, 1480), f"${net_payout:,.2f}", font=bold, fill="#000")         # Total
+    draw.text((915, 835), format_views(total_views), font=regular, fill="#000")   # Views
+    draw.text((1000, 1320), f"${gross_payout:,.2f}", font=bold, fill="#000")        # Subtotal
+    draw.text((1000, 1380), f"${tax:,.2f}", font=regular, fill="#000")              # Tax (12%)
+    draw.text((880, 1480), f"${net_payout:,.2f}", font=bold, fill="#FFF")         # Total
 
     # Save image to buffer
     buffer = BytesIO()
