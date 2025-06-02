@@ -2778,12 +2778,12 @@ async def invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
 
     # Fill the template
-    draw.text((850, 300), invoice_id, font=small, fill="#000")                    # Invoice ID
-    draw.text((160, 470), f"@{username}", font=regular, fill="#000")              # Username
-    draw.text((620, 525), format_views(total_views), font=regular, fill="#000")   # Views
-    draw.text((740, 990), f"${gross_payout:,.2f}", font=bold, fill="#000")        # Subtotal
-    draw.text((740, 1050), f"${tax:,.2f}", font=regular, fill="#000")              # Tax (12%)
-    draw.text((740, 1150), f"${net_payout:,.2f}", font=bold, fill="#000")         # Total
+    draw.text((950, 350), invoice_id, font=small, fill="#000")                    # Invoice ID
+    draw.text((160, 500), f"@{username}", font=regular, fill="#000")              # Username
+    draw.text((720, 705), format_views(total_views), font=regular, fill="#000")   # Views
+    draw.text((800, 1500), f"${gross_payout:,.2f}", font=bold, fill="#000")        # Subtotal
+    draw.text((800, 1550), f"${tax:,.2f}", font=regular, fill="#000")              # Tax (12%)
+    draw.text((800, 1620), f"${net_payout:,.2f}", font=bold, fill="#000")         # Total
 
     # Save image to buffer
     buffer = BytesIO()
