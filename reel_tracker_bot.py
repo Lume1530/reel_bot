@@ -2953,6 +2953,116 @@ async def slotdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Invalid slot number")
 
+# End cycle 
+async def generate_invoice_image(user_id, username, total_views):
+    gross_payout = round((total_views / 1000) * 0.025, 2)
+    tax = round(gross_payout * 0.12, 2)
+    net_payout = round(gross_payout - tax, 2)
+    invoice_id = f"INV-{user_id}-{datetime.now().strftime('%m%y')}"
+    bg = Image.open("invoice_template.jpg").convert("RGB")
+    draw = ImageDraw.Draw(bg)
+    bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
+    regular = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+    small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+    draw.text((1070, 313), invoice_id, font=small, fill="#000")
+    draw.text((160, 520), f"@{username}", font=regular, fill="#000")
+    draw.text((915, 835), format_views(total_views), font=regular, fill="#000")
+    draw.text((900, 1315), f"${gross_payout:,.2f}", font=bold, fill="#000")
+    draw.text((900, 1380), f"${tax:,.2f}", font=regular, fill="#000")
+    draw.text((880, 1480), f"${net_payout:,.2f}", font=bold, fill="#FFF")
+    buffer = BytesIO()
+    bg.save(buffer, format="JPEG")
+    buffer.seek(0)
+    return buffer
+
+# helper to reuse your profile card builder
+async def generate_profile_image(user_id, username, total_views, total_reels, payout, context):
+    bg = Image.open("template_profile_card.png").convert("RGB")
+    draw = ImageDraw.Draw(bg)
+    bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 44)
+    small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
+    try:
+        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
+        if photos.total_count > 0:
+            file = await context.bot.get_file(photos.photos[0][0].file_id)
+            img_data = requests.get(file.file_path).content
+            pfp = Image.open(BytesIO(img_data)).resize((250, 250)).convert("RGB")
+        else:
+            pfp = Image.new("RGB", (250, 250), "#ccc")
+    except:
+        pfp = Image.new("RGB", (250, 250), "#ccc")
+    mask = Image.new("L", (250, 250), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, 250, 250), fill=255)
+    bg.paste(pfp, (388, 280), mask)
+    uname_y = 580
+    uname_x = (1024 - draw.textlength(username, font=bold)) // 2
+    draw.text((uname_x, uname_y), username, font=bold, fill="#222")
+
+    badges = random.sample([
+        "Top Creator", "Content Emperor", "Rising Star", "Content King", "View Magnet", "Reel Master",
+        "Aura Farmer", "Engage More", "Watch Me Grow", "Trendsetter", "Viral Genius", "Storyteller",
+        "Next Big Thing", "Content Wizard", "Social Butterfly", "Power Poster", "Daily Hustler",
+        "Creative Beast", "Fan Favorite", "Mastermind", "Audience Magnet", "Game Changer", "Hit Maker",
+        "Visionary", "Bold & Brave"
+    ], 2)
+    full = badges[0] + " | " + badges[1]
+    x = (1024 - draw.textlength(full, font=small)) // 2
+    draw.text((x, uname_y + 60), full, font=small, fill="#222")
+
+    # stats
+    stats = [(format_millions(total_views), "VIEWS"),
+             (str(total_reels), "REELS"),
+             (f"${payout:,.2f}", "PAYOUT")]
+    for i, (val, label) in enumerate(stats):
+        x = [160, 430, 700][i]
+        draw.text((x, 760), val, font=bold, fill="#111")
+        draw.text((x, 800), label, font=small, fill="#666")
+
+    buffer = BytesIO()
+    bg.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+# MAIN command
+async def endcycle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("❌ Unauthorized.")
+
+    await update.message.reply_text("🚀 Sending invoices and profiles...")
+
+    sent = 0
+    skipped = 0
+
+    async with AsyncSessionLocal() as s:
+        result = await s.execute(text("SELECT user_id, username, total_views FROM users"))
+        users = result.fetchall()
+
+        for user_id, username, total_views in users:
+            try:
+                if total_views >= 4_000_000:
+                    total_reels = (await s.execute(
+                        text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id}
+                    )).scalar()
+                    payout = round((total_views / 1000) * 0.025, 2)
+
+                    invoice_img = await generate_invoice_image(user_id, username, total_views)
+                    profile_img = await generate_profile_image(user_id, username, total_views, total_reels, payout, context)
+
+                    await context.bot.send_photo(user_id, photo=invoice_img, caption="🧾 Your monthly invoice")
+                    await context.bot.send_photo(user_id, photo=profile_img, caption="📇 Your profile card")
+                    sent += 1
+                else:
+                    await context.bot.send_message(
+                        user_id,
+                        "⚠️ Sorry, you didn’t meet the required views criteria (4M) this cycle. Better Try Next Time!"
+                    )
+                    skipped += 1
+            except Exception as e:
+                print(f"Failed to send to {user_id}: {e}")
+                continue
+
+    await update.message.reply_text(f"✅ End cycle complete:\n📤 Sent: {sent}\n⏭️ Skipped: {skipped}")
+    
 @debug_handler
 async def clearslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear submissions for a specific slot"""
@@ -3037,6 +3147,7 @@ async def run_bot():
         ("slotdata", slotdata), 
         ("clearslot", clearslot), 
         ("lbpng", lbpng),
+        ("endcycle", endcycle),
         ("setmindate", setmindate), 
         ("getmindate", getmindate),
         ("referral", referral), 
