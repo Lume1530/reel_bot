@@ -2735,18 +2735,18 @@ async def remove_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #Invoice
 def format_views(n):
     if n >= 1_000_000_000:
-        return f"{n/1_000_000_000:.1f}B"
+        return f"{n / 1_000_000_000:.1f}B"
     elif n >= 1_000_000:
-        return f"{n/1_000_000:.1f}M"
+        return f"{n / 1_000_000:.1f}M"
     elif n >= 1_000:
-        return f"{n/1_000:.0f}K"
-    else:
-        return str(n)
+        return f"{n / 1_000:.0f}K"
+    return str(n)
 
-def calculate_net_payout(gross):
-    tax_rate = 0.048 + 0.04 + 0.032
-    return round(gross * (1 - tax_rate), 2)
+# Calculate 12% tax
+def calculate_tax(gross):
+    return round(gross * 0.12, 2)
 
+# Telegram bot command: /invoice <user_id>
 async def invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Usage: /invoice <user_id>")
@@ -2756,7 +2756,6 @@ async def invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         return await update.message.reply_text("❌ Invalid user ID.")
 
-    # Get user data
     async with AsyncSessionLocal() as s:
         result = await s.execute(text("SELECT username, total_views FROM users WHERE user_id = :u"), {"u": user_id})
         row = result.first()
@@ -2765,34 +2764,35 @@ async def invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         username, total_views = row
         gross_payout = round((total_views / 1000) * 0.025, 2)
-        net_payout = calculate_net_payout(gross_payout)
+        tax = calculate_tax(gross_payout)
+        net_payout = round(gross_payout - tax, 2)
         invoice_id = f"INV-{user_id}-{datetime.now().strftime('%m%y')}"
 
-    # Load invoice background
+    # Load the invoice template
     bg = Image.open("invoice_template.jpg").convert("RGB")
     draw = ImageDraw.Draw(bg)
 
-    # Fonts
+    # Load fonts (adjust paths if needed)
     bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
     regular = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
     small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
 
-    # 🧾 Fill fields accurately
+    # Fill the template
+    draw.text((750, 260), invoice_id, font=small, fill="#000")                    # Invoice ID
+    draw.text((160, 370), f"@{username}", font=regular, fill="#000")              # Username
+    draw.text((620, 525), format_views(total_views), font=regular, fill="#000")   # Views
+    draw.text((740, 890), f"${gross_payout:,.2f}", font=bold, fill="#000")        # Subtotal
+    draw.text((740, 950), f"${tax:,.2f}", font=regular, fill="#000")              # Tax (12%)
+    draw.text((740, 1010), f"${net_payout:,.2f}", font=bold, fill="#000")         # Total
 
-    draw.text((750, 160), invoice_id, font=small, fill="#000")               # Invoice ID
-    draw.text((180, 270), f"@{username}", font=regular, fill="#000")         # Username
-    draw.text((610, 370), format_views(total_views), font=regular, fill="#000")  # Views (short format)
-
-    draw.text((750, 690), f"${gross_payout:,.2f}", font=bold, fill="#000")   # Subtotal
-    draw.text((620, 730), "-12%", font=small, fill="#888")                   # Tax Label (grayed)
-    draw.text((750, 780), f"${net_payout:,.2f}", font=bold, fill="#000")     # Final Total
-
-    # Save & send
+    # Save image to buffer
     buffer = BytesIO()
     bg.save(buffer, format="JPEG")
     buffer.seek(0)
-    await update.message.reply_photo(photo=buffer, caption=f"🧾 Invoice for @{username}")
 
+    # Send back to user
+    await update.message.reply_photo(photo=buffer, caption=f"🧾 Invoice for @{username}")
+    
 #Profile
 def format_millions(n):
     return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
