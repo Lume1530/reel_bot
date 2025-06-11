@@ -3024,16 +3024,17 @@ async def generate_profile_image(user_id, username, total_views, total_reels, pa
     return buffer
 
 # MAIN command
+@debug_handler
 async def endcycle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return await update.message.reply_text("❌ Unauthorized.")
-
-    await update.message.reply_text("🚀 Sending invoices and profiles...")
-
-    sent = 0
-    skipped = 0
-
     async with AsyncSessionLocal() as s:
+        if not await is_admin(update.effective_user.id):
+            return await update.message.reply_text("❌ Unauthorized.")
+
+        await update.message.reply_text("🚀 Sending invoices and profiles...")
+
+        sent = 0
+        skipped = 0
+
         result = await s.execute(text("SELECT user_id, username, total_views FROM users"))
         users = result.fetchall()
 
@@ -3054,14 +3055,14 @@ async def endcycle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await context.bot.send_message(
                         user_id,
-                        "⚠️ Sorry, you didn’t meet the required views criteria (4M) this cycle. Better Try Next Time!"
+                        "⚠️ Sorry, you didn’t meet the required views criteria (4M) this cycle. Better try next time!"
                     )
                     skipped += 1
             except Exception as e:
-                print(f"Failed to send to {user_id}: {e}")
+                logger.error(f"❌ Failed to send to {user_id}: {e}")
                 continue
 
-    await update.message.reply_text(f"✅ End cycle complete:\n📤 Sent: {sent}\n⏭️ Skipped: {skipped}")
+        await update.message.reply_text(f"✅ End cycle complete:\n📤 Sent: {sent}\n⏭️ Skipped: {skipped}")
     
 @debug_handler
 async def clearslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
