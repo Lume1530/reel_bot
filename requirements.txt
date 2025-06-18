@@ -8,3 +8,4 @@ sqlalchemy
 asyncpg
 pillow
 logger
+aiohttp
