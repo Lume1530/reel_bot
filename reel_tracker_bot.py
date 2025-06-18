@@ -2,20 +2,23 @@ import os
 import re
 import asyncio
 import logging
-import requests
-import io
 from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+import requests
 from PIL import Image, ImageDraw, ImageFont
-from io import BytesIO
-import time
-import random
-from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
-
+from sqlalchemy import create_engine, Column, Integer, String, BigInteger, DateTime, Boolean, text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
 from fastapi import FastAPI
 import uvicorn
+from dotenv import load_dotenv
+
+# Import the new Apify client
+from apify_client import get_apify_client
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -23,15 +26,17 @@ from sqlalchemy import Column, Integer, String, BigInteger, text
 
 # ─── Load config ─────────────────────────────────────────────────────────────
 load_dotenv()
-TOKEN        = os.getenv("TOKEN")
+TOKEN        = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_IDS    = set(map(int, os.getenv("ADMIN_ID", "").split(",")))
+ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS    = set(map(int, ADMIN_IDS_STR.split(","))) if ADMIN_IDS_STR.strip() else set()
 PORT         = int(os.getenv("PORT", 8000))
-LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", 0))
-ENSEMBLE_TOKEN = os.getenv("ENSEMBLE_TOKEN")
+LOG_GROUP_ID_STR = os.getenv("LOG_GROUP_ID", "0")
+LOG_GROUP_ID = int(LOG_GROUP_ID_STR) if LOG_GROUP_ID_STR.isdigit() else None
+APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 
-if not all([TOKEN, DATABASE_URL, ENSEMBLE_TOKEN]):
-    print("❌ TOKEN, DATABASE_URL, and ENSEMBLE_TOKEN must be set in .env")
+if not all([TOKEN, DATABASE_URL, APIFY_TOKEN]):
+    print("❌ BOT_TOKEN, DATABASE_URL, and APIFY_TOKEN must be set in .env")
     exit(1)
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
@@ -140,6 +145,16 @@ async def init_db():
             )
         """))
         
+        # Create config table first
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS config (
+                id SERIAL PRIMARY KEY,
+                key VARCHAR NOT NULL UNIQUE,
+                value VARCHAR NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        
         # Add global commission rate to config table
         await conn.execute(text("""
             INSERT INTO config (key, value) 
@@ -181,18 +196,94 @@ async def init_db():
 # ─── ORM models ───────────────────────────────────────────────────────────────
 class Reel(Base):
     __tablename__ = "reels"
-    id        = Column(Integer, primary_key=True)
-    user_id   = Column(BigInteger, nullable=False)
-    shortcode = Column(String, nullable=False)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    shortcode = Column(String, nullable=False, unique=True)
+    url = Column(String, nullable=True)
+    username = Column(String, nullable=True)
+    views = Column(BigInteger, default=0)
+    likes = Column(BigInteger, default=0)
+    comments = Column(BigInteger, default=0)
+    caption = Column(String, nullable=True)
+    media_url = Column(String, nullable=True)
+    submitted_at = Column(DateTime, default=datetime.now)
+    last_updated = Column(DateTime, default=datetime.now)
 
 class User(Base):
     __tablename__ = "users"
-    user_id     = Column(BigInteger, primary_key=True)
-    username    = Column(String, nullable=True)
-    registered  = Column(Integer, default=0)
+    user_id = Column(BigInteger, primary_key=True)
+    username = Column(String, nullable=True)
+    registered = Column(Integer, default=0)
+    approved = Column(Boolean, default=False)
     total_views = Column(BigInteger, default=0)
+    total_reels = Column(Integer, default=0)
+    max_slots = Column(Integer, default=50)
+    used_slots = Column(Integer, default=0)
+    last_submission = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+
+class SubmissionLog(Base):
+    __tablename__ = "submission_logs"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    username = Column(String, nullable=True)
+    action = Column(String, nullable=False)
+    details = Column(String, nullable=True)
+    timestamp = Column(DateTime, default=datetime.now)
 
 # ─── Utilities ─────────────────────────────────────────────────────────────────
+def validate_instagram_link(url: str) -> bool:
+    """Validate if URL is a valid Instagram reel/post URL"""
+    import re
+    
+    # Clean up the URL - remove @ symbol and query parameters
+    url = url.strip().lstrip('@')
+    url = url.split('?')[0]  # Remove query parameters
+    
+    patterns = [
+        r'instagram\.com/(?:[^/]+/)?(?:p|reel|tv)/([A-Za-z0-9_-]+)',
+        r'instagram\.com/reel/([A-Za-z0-9_-]+)',
+        r'instagram\.com/p/([A-Za-z0-9_-]+)',
+        r'instagram\.com/tv/([A-Za-z0-9_-]+)'
+    ]
+    
+    for pattern in patterns:
+        if re.search(pattern, url):
+            return True
+    return False
+
+def extract_shortcode_from_url(url: str) -> Optional[str]:
+    """Extract shortcode from Instagram URL"""
+    import re
+    
+    # Clean up the URL - remove @ symbol and query parameters
+    url = url.strip().lstrip('@')
+    url = url.split('?')[0]  # Remove query parameters
+    
+    patterns = [
+        r'instagram\.com/(?:[^/]+/)?(?:p|reel|tv)/([A-Za-z0-9_-]+)',
+        r'/(?:p|reel|tv)/([A-Za-z0-9_-]+)',
+        r'^([A-Za-z0-9_-]+)$'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+# Create a synchronous session for the updated functions
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+# Create synchronous engine and session
+sync_engine = create_engine(DATABASE_URL.replace('+asyncpg', ''))
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
+session = SessionLocal()
+
+# Update ADMIN_USER_IDS to use the correct variable name
+ADMIN_USER_IDS = ADMIN_IDS
+
 async def is_admin(user_id: int) -> bool:
     async with AsyncSessionLocal() as s:
         result = await s.execute(
@@ -222,79 +313,21 @@ def debug_handler(fn):
     return wrapper
 
 async def get_reel_data(shortcode: str) -> dict:
-    """Get reel data from EnsembleData API"""
+    """Get reel data using Apify API"""
     try:
-        # Clean up the URL/input
-        shortcode = shortcode.strip()
+        # Get the Apify client instance
+        apify_client = get_apify_client()
         
-        # Extract shortcode from URL if full URL is provided
-        if 'instagram.com' in shortcode:
-            # Try different URL patterns
-            patterns = [
-                r'instagram\.com/(?:([^/]+)/)?reel/([^/?#&]+)',  # Standard format
-                r'reel/([^/?#&]+)',  # Just the reel part
-                r'([A-Za-z0-9_-]+)$'  # Just the shortcode
-            ]
-            
-            for pattern in patterns:
-                match = re.search(pattern, shortcode)
-                if match:
-                    shortcode = match.group(1) if len(match.groups()) == 1 else match.group(2)
-                    break
-            else:
-                raise Exception("Could not extract shortcode from URL")
-        else:
-            # If it's not a URL, assume it's just the shortcode
-            shortcode = shortcode.strip('/')
-
-        # Get reel data using post details endpoint
-        api_url = 'https://ensembledata.com/apis/instagram/post/details'
-        params = {
-            'code': shortcode,
-            'n_comments_to_fetch': 0,
-            'token': ENSEMBLE_TOKEN
-        }
+        # Use the legacy method that returns data in the expected format
+        reel_data = await apify_client.get_reel_data(shortcode)
         
-        response = requests.get(api_url, params=params)
-        response.raise_for_status()
+        logger.info(f"✅ Successfully scraped reel data for: {reel_data.get('owner_username', 'unknown')}")
+        logger.info(f"View count: {reel_data.get('view_count', 0)}")
         
-        data = response.json()
-        if not data.get('data'):
-            raise Exception("No reel data found")
-            
-        reel_data = data['data']
+        return reel_data
         
-        # Log the raw data for debugging
-        logger.info(f"Raw reel data: {reel_data}")
-        
-        # Get view count based on media type
-        view_count = 0
-        if reel_data.get('is_video', False):
-            # For videos, get view count from video_play_count
-            view_count = reel_data.get('video_play_count', 0)
-            logger.info(f"Video play count: {view_count}")
-        else:
-            # For images, get view count from edge_media_preview_like
-            view_count = reel_data.get('edge_media_preview_like', {}).get('count', 0)
-            logger.info(f"Image like count: {view_count}")
-        
-        # Log the extracted counts
-        logger.info(f"Extracted view_count: {view_count}")
-        
-        return {
-    'owner_username': reel_data.get('owner', {}).get('username', ''),
-    'view_count': view_count,
-    'play_count': view_count,
-    'taken_at_timestamp': reel_data.get('taken_at_timestamp') or reel_data.get('taken_at') or reel_data.get('timestamp')
-}
-
-                
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 422:
-            raise Exception("Invalid reel URL or shortcode")
-        raise Exception(f"API Error: {str(e)}")
     except Exception as e:
-        logger.error(f"Error in get_reel_data: {str(e)}")
+        logger.error(f"❌ Error in get_reel_data: {str(e)}")
         raise Exception(f"Error fetching reel data: {str(e)}")
 
 async def update_all_reel_views():
@@ -340,58 +373,74 @@ force_update_lock = asyncio.Lock()
 
 @debug_handler
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cmds = [
-        "👋 <b>Welcome to Reel Tracker Bot!</b>",
-        "",
-        "📋 <b>User Commands:</b>",
-        "• <code>/addaccount &lt;@handle&gt;</code> - Request to link your Instagram account (max 15 accounts, 5 pending)",
-        "• <code>/submit &lt;link&gt;</code> - Submit your reel to track",
-        "• <code>/remove &lt;shortcode or URL&gt;</code> - Remove an added reel",
-        "• <code>/creatorstats</code> - Show your statistics and payment info",
-        "",
-        "💰 <b>Payment Commands:</b>",
-        "• <code>/addusdt &lt;address&gt;</code> - Add your USDT ERC20 address",
-        "• <code>/addpaypal &lt;email&gt;</code> - Add your PayPal email",
-        "• <code>/addupi &lt;address&gt;</code> - Add your UPI address",
-    ]
+    """Start command - register user and show help"""
+    user_id = update.effective_user.id
+    username = update.effective_user.username or "Unknown"
     
-    if await is_admin(update.effective_user.id):
-        cmds += [
-            "",
-            "👑 <b>Admin Commands:</b>",
-            "• <code>/banuser &lt;user_id&gt;</code> - Ban a user and delete all data",
-            "• <code>/unban &lt;user_id&gt;</code> - Unban a user",
-            "• <code>/addviews &lt;user_id&gt; &lt;views&gt;</code> - Add views manually",
-            "• <code>/currentaccounts</code> - List all IG accounts",
-            "• <code>/userinfo &lt;user_id&gt;</code> - Lists stats for all creators with payment info",
-            "• <code>/review &lt;user_id&gt;</code> - Review account link requests",
-            "• <code>/removeallaccs &lt;user_id&gt;</code> - Remove all accounts for a user",
-            "• <code>/removeacc &lt;user_id&gt; &lt;@handle&gt;</code> - Remove specific account",
-            "• <code>/userstats</code> - View Users Reels",
-            "• <code>/currentstats</code> - Show total views and working accounts",
-            "• <code>/broadcast &lt;message&gt;</code> - Send message to all users",
-            "• <code>/cleardata</code> - Clear all reel links",
-            "• <code>/export</code> - Export stats.txt for all users",
-            "• <code>/forceupdate</code> - Force update all reel views",
-            "• <code>/clearbad</code> - Remove submissions with less than 10k views after 7 days",
-            "• <code>/setmindate &lt;YYYY-MM-DD&gt;</code> - Set minimum allowed video upload date",
-            "• <code>/getmindate</code> - Show current minimum allowed video date",
-            "",
-            "🎯 <b>Slot Management:</b>",
-            "• <code>/addslot &lt;1|2&gt; &lt;handle1&gt; &lt;handle2&gt; ...</code> - Add handles to slot",
-            "• <code>/removeslot &lt;1|2&gt; &lt;handle&gt;</code> - Remove handle from slot",
-            "• <code>/slotstats</code> - Show current handles and submissions in slots",
-            "• <code>/slotdata &lt;1|2&gt;</code> - Show and clear slot submissions",
-            "• <code>/addadmin &lt;user_id&gt;</code> - Add new admin",
-            "• <code>/removeadmin &lt;user_id&gt;</code> - Remove admin",
-            "",
-            "👥 <b>Referral Management:</b>",
-            "• <code>/referral &lt;user_id&gt; &lt;referrer_id&gt;</code> - Assign referral relationship",
-            "• <code>/referralstats</code> - View referral statistics for all users",
-            "• <code>/setcommission &lt;rate&gt;</code> - Set global commission rate",
-            "• <code>/getcommission</code> - View current commission rate",
-        ]
-    await update.message.reply_text("\n".join(cmds), parse_mode=ParseMode.HTML)
+    # Create user account if it doesn't exist
+    async with AsyncSessionLocal() as s:
+        # Check if user already exists
+        existing_user = (await s.execute(
+            text("SELECT user_id FROM users WHERE user_id = :u"),
+            {"u": user_id}
+        )).fetchone()
+        
+        if not existing_user:
+            # Create new user account
+            await s.execute(
+                text("INSERT INTO users (user_id, username, approved, total_views, total_reels, max_slots, used_slots) VALUES (:u, :n, :a, :v, :r, :m, :s)"),
+                {"u": user_id, "n": username, "a": False, "v": 0, "r": 0, "m": 50, "s": 0}
+            )
+            await s.commit()
+            
+            welcome_msg = f"🎉 Welcome to Instagram Reel Tracker Bot, {username}!\n\n"
+            welcome_msg += "✅ Your account has been created successfully!\n\n"
+        else:
+            welcome_msg = f"👋 Welcome back, {username}!\n\n"
+    
+    # Show help text
+    help_text = """🤖 <b>Instagram Reel Tracker Bot</b>
+
+📋 <b>Available Commands:</b>
+• <code>/submit &lt;url&gt;</code> - Submit Instagram reel URLs for tracking
+• <code>/profile</code> - View your profile and statistics  
+• <code>/addusdt &lt;address&gt;</code> - Add USDT ERC20 payment address
+• <code>/addpaypal &lt;email&gt;</code> - Add PayPal payment email
+• <code>/addupi &lt;address&gt;</code> - Add UPI payment address
+• <code>/addaccount &lt;instagram_handle&gt;</code> - Request to link Instagram account
+
+💡 <b>Getting Started:</b>
+1. Add at least one payment method (USDT, PayPal, or UPI)
+2. Request to link your Instagram account with <code>/addaccount</code>
+3. Wait for admin approval
+4. Start submitting reels with <code>/submit</code>
+
+📊 <b>Features:</b>
+• Track Instagram reel views, likes, and comments
+• Automatic view updates
+• Detailed statistics and analytics
+• Secure payment processing
+
+❓ Need help? Contact an admin for support."""
+
+    if await is_admin(user_id):
+        help_text += """
+
+🔧 <b>Admin Commands:</b>
+• <code>/userstats</code> - View user statistics
+• <code>/currentaccounts</code> - View linked accounts
+• <code>/creatorstats &lt;user_id&gt;</code> - View creator stats
+• <code>/addviews &lt;shortcode&gt; &lt;views&gt;</code> - Add custom views
+• <code>/banuser &lt;user_id&gt;</code> - Ban a user
+• <code>/unban &lt;user_id&gt;</code> - Unban a user
+• <code>/broadcast &lt;message&gt;</code> - Send message to all users
+• <code>/export</code> - Export data
+• <code>/forceupdate</code> - Force update all reel views
+• <code>/addadmin &lt;user_id&gt;</code> - Add admin
+• <code>/removeadmin &lt;user_id&gt;</code> - Remove admin
+• <code>/review &lt;user_id&gt;</code> - Review account requests"""
+
+    await update.message.reply_text(welcome_msg + help_text, parse_mode=ParseMode.HTML)
 
 @debug_handler
 async def addaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -797,122 +846,287 @@ async def addviews_custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @debug_handler
 async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📌 *Submissions are currently paused.*\nPlease wait for further announcements.",
-        parse_mode="Markdown"
-    )
-'''    
-async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import time
-    from datetime import datetime
-    
+    """Handle reel submission with automatic task creation"""
     user_id = update.effective_user.id
-    now = time.time()
+    username = update.effective_user.username or "Unknown"
     
-    # Check if force update is running
-    if force_update_lock.locked():
-        return await update.message.reply_text(
-            "⏳ Please wait a moment. The system is currently updating view counts.\n"
-            "Try submitting again in a few seconds."
-        )
-    
-    # Cooldown check
-    last_time = submit_cooldowns.get(user_id, 0)
-    if now - last_time < 30:
-        wait = int(30 - (now - last_time))
-        return await update.message.reply_text(f"⏳ Please wait {wait} seconds before submitting again.")
-    submit_cooldowns[user_id] = now
-
-    if not context.args:
-        return await update.message.reply_text("❗ Provide up to 5 reel links, separated by commas.")
-    # Join all args and split by comma
-    raw = " ".join(context.args)
-    links = [l.strip() for l in raw.split(",") if l.strip()]
-    if not links or len(links) > 5:
-        return await update.message.reply_text("❗ You can submit up to 5 links at once, separated by commas.")
-
-    uid = user_id
-    results = []
-    min_date_str = await get_min_date()
-    min_date = parse_date(min_date_str) if min_date_str else None
-    async with AsyncSessionLocal() as s:
-        # Check if user exists, if not create it
-        user = (await s.execute(text("SELECT total_views FROM users WHERE user_id = :u"), {"u": uid})).fetchone()
-        if not user:
-            await s.execute(
-                text("INSERT INTO users (user_id, username, total_views) VALUES (:u, :n, 0)"),
-                {"u": uid, "n": update.effective_user.username}
+    try:
+        # Check if user exists using async session
+        async with AsyncSessionLocal() as s:
+            user_result = await s.execute(
+                text("SELECT user_id, approved, last_submission, total_reels, total_views, used_slots, max_slots FROM users WHERE user_id = :u"),
+                {"u": user_id}
             )
-            await s.commit()
-            current_views = 0
+            user_data = user_result.fetchone()
+            
+            if not user_data:
+                await update.message.reply_text("❌ You need to register first. Use /start to begin.")
+                return
+            
+            user_id_db, approved, last_submission, total_reels, total_views, used_slots, max_slots = user_data
+            
+            # Check if user is approved (or if user is admin)
+            is_user_admin = user_id in ADMIN_IDS
+            if not approved and not is_user_admin:
+                await update.message.reply_text("❌ Your account is pending approval. Please wait for admin approval.")
+                return
+            
+            # Check cooldown
+            if last_submission:
+                time_since_last = datetime.now() - last_submission
+                cooldown_minutes = 5  # 5 minute cooldown
+                if time_since_last.total_seconds() < cooldown_minutes * 60:
+                    remaining = cooldown_minutes * 60 - time_since_last.total_seconds()
+                    await update.message.reply_text(f"⏰ Please wait {int(remaining/60)} minutes and {int(remaining%60)} seconds before submitting again.")
+                    return
+        
+        # Get the message text
+        message_text = update.message.text.strip()
+        if not message_text or message_text == '/submit':
+            await update.message.reply_text("📝 Please provide Instagram reel URLs after the /submit command.\n\nExample: `/submit https://instagram.com/reel/ABC123/`")
+            return
+        
+        # Extract URLs from message
+        urls = []
+        
+        # Remove the /submit command and get the rest
+        if message_text.startswith('/submit'):
+            url_part = message_text[7:].strip()  # Remove '/submit' and whitespace
+            if url_part:
+                # Split by whitespace to handle multiple URLs
+                potential_urls = url_part.split()
+                for url in potential_urls:
+                    url = url.strip()
+                    if url:
+                        # Clean up the URL
+                        if 'instagram.com' in url or url.startswith('http'):
+                            urls.append(url)
+                        elif len(url) > 5:  # Assume it's a shortcode
+                            urls.append(f"https://www.instagram.com/reel/{url}/")
         else:
-            current_views = user[0] or 0
-        # Fetch all linked Instagram handles for the user
-        accounts = [r[0].lower() for r in (await s.execute(
-            text("SELECT insta_handle FROM allowed_accounts WHERE user_id=:u"), {"u": uid}
-        )).fetchall()]
-        if not accounts:
-            return await update.message.reply_text("🚫 No IG linked—ask admin to /addaccount.")
-        for link in links:
-            m = re.search(r"^(?:https?://)?(?:www\.|m\.)?instagram\.com/(?:(?P<sup>[^/]+)/)?reel/(?P<code>[^/?#&]+)", link)
-            if not m:
-                results.append(f"❌ Invalid: {link}")
-                continue
-            sup, code = m.group("sup"), m.group("code")
-            try:
-                reel_data = await get_reel_data(code)
-                # Check min date
-                upload_date = None
-                if 'taken_at_timestamp' in reel_data:
-                    upload_date = datetime.utcfromtimestamp(reel_data['taken_at_timestamp']).date()
-                elif 'upload_date' in reel_data:
-                    upload_date = datetime.strptime(reel_data['upload_date'], "%Y-%m-%d").date()
-                if min_date and upload_date and upload_date < min_date:
-                    results.append(f"🚫 Too old: {link} (uploaded {upload_date}, min allowed {min_date})")
-                    continue
-                # Check if the reel owner matches any linked account
-                if reel_data['owner_username'].lower() not in accounts:
-                    results.append(f"🚫 Not your reel: {link}")
-                    continue
-                # Update total views in users table
-                new_views = current_views + reel_data['view_count']
-                await s.execute(
-                    text("UPDATE users SET total_views = :v WHERE user_id = :u"),
-                    {"v": new_views, "u": uid}
-                )
-                # Check if this handle belongs to a slot
-                slot = await s.execute(text("""
-                    SELECT slot_number FROM slot_accounts 
-                    WHERE LOWER(insta_handle) = LOWER(:h)
-                """), {"h": reel_data['owner_username']})
-                slot_result = slot.fetchone()
-                if slot_result:
-                    slot_number = slot_result[0]
-                    await s.execute(text("""
-                        INSERT INTO slot_submissions (slot_number, shortcode, insta_handle, view_count)
-                        VALUES (:s, :c, :h, :v)
-                    """), {
-                        "s": slot_number,
-                        "c": code,
-                        "h": reel_data['owner_username'],
-                        "v": reel_data['view_count']
-                    })
-                # Check for duplicate
-                dup = (await s.execute(text("SELECT 1 FROM reels WHERE shortcode=:c"), {"c": code})).scalar()
-                if dup:
-                    results.append(f"⚠️ Already added: {link}")
-                    continue
-                await s.execute(text("INSERT INTO reels(user_id,shortcode) VALUES(:u,:c)"), {"u": uid, "c": code})
+            # Handle multi-line format
+            lines = message_text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith('/submit'):
+                    # Clean up the URL
+                    if 'instagram.com' in line or line.startswith('http'):
+                        urls.append(line)
+                    elif len(line) > 5:  # Assume it's a shortcode
+                        urls.append(f"https://www.instagram.com/reel/{line}/")
+        
+        if not urls:
+            await update.message.reply_text("❌ No valid Instagram URLs found. Please provide valid Instagram reel URLs.")
+            return
+        
+        # Validate URLs and check for duplicates
+        valid_urls = []
+        invalid_urls = []
+        duplicate_urls = []
+        
+        async with AsyncSessionLocal() as s:
+            for url in urls:
+                if validate_instagram_link(url):
+                    # Extract shortcode and check if it already exists
+                    shortcode = extract_shortcode_from_url(url)
+                    if shortcode:
+                        existing = await s.execute(
+                            text("SELECT 1 FROM reels WHERE shortcode = :sc"),
+                            {"sc": shortcode}
+                        )
+                        if existing.fetchone():
+                            duplicate_urls.append(url)
+                        else:
+                            valid_urls.append(url)
+                    else:
+                        invalid_urls.append(url)
+                else:
+                    invalid_urls.append(url)
+        
+        if not valid_urls:
+            error_msg = "❌ No valid new Instagram reel URLs found."
+            if duplicate_urls:
+                error_msg += f"\n\n🔄 {len(duplicate_urls)} URL(s) already exist in database."
+            if invalid_urls:
+                error_msg += f"\n\n❌ {len(invalid_urls)} invalid URL(s) were skipped."
+            await update.message.reply_text(error_msg)
+            return
+        
+        # Notify user about skipped URLs if any
+        if invalid_urls or duplicate_urls:
+            skip_msg = ""
+            if duplicate_urls:
+                skip_msg += f"🔄 {len(duplicate_urls)} URL(s) already exist and were skipped.\n"
+            if invalid_urls:
+                skip_msg += f"❌ {len(invalid_urls)} invalid URL(s) were skipped.\n"
+            skip_msg += f"📋 Processing {len(valid_urls)} new URL(s)..."
+            await update.message.reply_text(skip_msg)
+        
+        # Create Apify task for scraping
+        processing_msg = await update.message.reply_text(f"🔄 Creating scraping task for {len(valid_urls)} reel(s)...")
+        
+        try:
+            # Get Apify client and create task
+            apify_client = get_apify_client()
+            task_id = await apify_client.create_scraping_task(valid_urls, "single")
+            
+            await processing_msg.edit_text(f"📋 Task created: {task_id}\n🔄 Processing {len(valid_urls)} reel(s)... This may take a few minutes.")
+            
+            # Wait for task completion with progress updates
+            start_time = datetime.now()
+            timeout = 300  # 5 minutes timeout
+            
+            # Wait for task completion using the built-in wait method
+            result = await apify_client.get_task_results(task_id, wait=True, timeout=timeout)
+            
+            if result["status"] != "completed":
+                if result["status"] == "timeout":
+                    raise Exception("Task timed out after 5 minutes")
+                else:
+                    raise Exception(f"Task failed: {result.get('task_info', {}).get('error', 'Unknown error')}")
+            
+            await processing_msg.edit_text(f"📋 Task: {task_id}\n✅ Processing completed! Analyzing results...")
+            
+            # Process results and add to database
+            successful_reels = []
+            failed_reels = []
+            
+            async with AsyncSessionLocal() as s:
+                try:
+                    for item in result["results"]:
+                        if item.get("success", False):
+                            try:
+                                # Extract shortcode from URL
+                                shortcode = extract_shortcode_from_url(item["url"])
+                                if not shortcode:
+                                    failed_reels.append({"url": item["url"], "error": "Could not extract shortcode"})
+                                    continue
+                                
+                                # Double-check if reel already exists (race condition protection)
+                                existing_check = await s.execute(
+                                    text("SELECT 1 FROM reels WHERE shortcode = :sc"),
+                                    {"sc": shortcode}
+                                )
+                                if existing_check.fetchone():
+                                    failed_reels.append({"url": item["url"], "error": "Reel already exists"})
+                                    continue
+                                
+                                # Insert new reel entry
+                                await s.execute(
+                                    text("""
+                                        INSERT INTO reels (user_id, shortcode, url, username, views, likes, comments, caption, media_url, submitted_at, last_updated)
+                                        VALUES (:user_id, :shortcode, :url, :username, :views, :likes, :comments, :caption, :media_url, :submitted_at, :last_updated)
+                                    """),
+                                    {
+                                        "user_id": user_id,
+                                        "shortcode": shortcode,
+                                        "url": item["url"],
+                                        "username": item.get("username", ""),
+                                        "views": item.get("views", 0),
+                                        "likes": item.get("likes", 0),
+                                        "comments": item.get("comments", 0),
+                                        "caption": item.get("caption", "")[:500],  # Limit caption length
+                                        "media_url": item.get("media_url", ""),
+                                        "submitted_at": datetime.now(),
+                                        "last_updated": datetime.now()
+                                    }
+                                )
+                                
+                                successful_reels.append({
+                                    "shortcode": shortcode,
+                                    "username": item.get("username", ""),
+                                    "views": item.get("views", 0)
+                                })
+                                
+                            except Exception as e:
+                                logger.error(f"Error processing reel {item.get('url', 'unknown')}: {str(e)}")
+                                failed_reels.append({"url": item.get("url", "unknown"), "error": str(e)})
+                        else:
+                            failed_reels.append({"url": item.get("url", "unknown"), "error": item.get("error", "Scraping failed")})
+                    
+                    # Update user statistics
+                    if successful_reels:
+                        # Ensure user fields have default values if they're None
+                        total_reels = total_reels or 0
+                        total_views = total_views or 0
+                        used_slots = used_slots or 0
+                        
+                        new_total_reels = total_reels + len(successful_reels)
+                        new_total_views = total_views + sum(reel["views"] for reel in successful_reels)
+                        new_used_slots = used_slots + len(successful_reels)
+                        
+                        await s.execute(
+                            text("""
+                                UPDATE users 
+                                SET total_reels = :total_reels, total_views = :total_views, 
+                                    used_slots = :used_slots, last_submission = :last_submission
+                                WHERE user_id = :user_id
+                            """),
+                            {
+                                "total_reels": new_total_reels,
+                                "total_views": new_total_views,
+                                "used_slots": new_used_slots,
+                                "last_submission": datetime.now(),
+                                "user_id": user_id
+                            }
+                        )
+                    
+                    # Log submission
+                    await s.execute(
+                        text("""
+                            INSERT INTO submission_logs (user_id, username, action, details, timestamp)
+                            VALUES (:user_id, :username, :action, :details, :timestamp)
+                        """),
+                        {
+                            "user_id": user_id,
+                            "username": username,
+                            "action": "submit",
+                            "details": f"Task: {task_id}, Success: {len(successful_reels)}, Failed: {len(failed_reels)}",
+                            "timestamp": datetime.now()
+                        }
+                    )
+                    
+                    await s.commit()
+                    
+                except Exception as e:
+                    await s.rollback()
+                    raise e
+            
+            # Send results to user
+            if successful_reels:
+                result_text = f"✅ Successfully added {len(successful_reels)} reel(s):\n\n"
+                for reel in successful_reels[:5]:  # Show first 5
+                    result_text += f"📊 @{reel['username']} - {reel['views']:,} views\n"
                 
-                # Log the submission
-                logger.info(f"User {uid} submitted reel {code} with {reel_data['view_count']} views")
+                if len(successful_reels) > 5:
+                    result_text += f"\n... and {len(successful_reels) - 5} more reels"
                 
-                results.append(f"✅ Added: {link}")
-            except Exception as e:
-                results.append(f"❌ Error: {link} ({str(e)})")
-        await s.commit()
-    await update.message.reply_text("\n".join(results))
-    '''
+                new_total_reels = (total_reels or 0) + len(successful_reels)
+                new_total_views = (total_views or 0) + sum(reel["views"] for reel in successful_reels)
+                new_used_slots = (used_slots or 0) + len(successful_reels)
+                
+                result_text += f"\n\n📈 Your total: {new_total_reels} reels, {new_total_views:,} views"
+                result_text += f"\n🎯 Slots used: {new_used_slots}/{max_slots or 50}"
+                
+                await processing_msg.edit_text(result_text)
+            
+            if failed_reels:
+                error_text = f"❌ {len(failed_reels)} reel(s) failed:\n\n"
+                for fail in failed_reels[:3]:  # Show first 3 failures
+                    error_text += f"• {fail['url'][:50]}... - {fail['error']}\n"
+                
+                if len(failed_reels) > 3:
+                    error_text += f"\n... and {len(failed_reels) - 3} more failures"
+                
+                await update.message.reply_text(error_text)
+            
+        except Exception as e:
+            logger.error(f"Error in submit task processing: {str(e)}")
+            await processing_msg.edit_text(f"❌ Error processing reels: {str(e)}")
+            
+    except Exception as e:
+        logger.error(f"Error in submit command: {str(e)}")
+        await update.message.reply_text(f"❌ An error occurred: {str(e)}")
 
 @debug_handler
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1157,27 +1371,104 @@ async def send_creatorstats_page(source, context, uid, page):
         )).fetchone()
         usdt, paypal, upi = payment_details or (None, None, None)
 
+        # Get referral information
+        # Get who referred this user
+        referrer_data = await s.execute(
+            text("""
+                SELECT r.referrer_id, u.username
+                FROM referrals r
+                JOIN users u ON r.referrer_id = u.user_id
+                WHERE r.user_id = :u
+            """),
+            {"u": uid}
+        )
+        referrer_info = referrer_data.fetchone()
+        
+        # Get users referred by this user
+        referred_data = await s.execute(
+            text("""
+                SELECT r.user_id, u.username, u.total_views
+                FROM referrals r
+                JOIN users u ON r.user_id = u.user_id
+                WHERE r.referrer_id = :u
+            """),
+            {"u": uid}
+        )
+        referred_users = referred_data.fetchall()
+        
+        # Get global commission rate
+        commission_rate_data = await s.execute(
+            text("""
+                SELECT value
+                FROM config
+                WHERE key = 'referral_commission_rate'
+            """)
+        )
+        commission_rate = float(commission_rate_data.scalar() or 0)
+
+        # Calculate referral stats
+        total_referral_views = 0
+        if referred_users:
+            for ref_id, ref_username, views in referred_users:
+                views = views or 0
+                total_referral_views += views
+        
+        commission_amount = (total_referral_views / 1000) * 0.025 * (commission_rate / 100)
+
         msg = [
-            "👤 <b>Your Creator Statistics</b>",
-            f"• Linked Instagram: {', '.join(f'@{h}' for h in handles) if handles else '—'}",
-            f"• Total Reels: <b>{len(links)}</b>",
+            "📊 <b>Your Creator Statistics</b>",
             f"• Total Views: <b>{int(total_views):,}</b>",
-            f"• Payable: <b>${payable_amount:.2f}</b>",
-            "• Rate: $25 per 1M Views",
+            f"• Total Videos: <b>{len(links)}</b>",
+            f"• Linked Accounts: <b>{len(handles)}</b>",
+            f"• Payable Amount: <b>${payable_amount:.2f}</b>",
             "",
-            "💳 <b>Payment Methods:</b>"
+            "<i>Pay Rate: <b>$25 per 1M Views</b></i>",
+            ""
         ]
-        if usdt: msg.append(f"• USDT: <code>{usdt}</code>")
-        if paypal: msg.append(f"• PayPal: <code>{paypal}</code>")
-        if upi: msg.append(f"• UPI: <code>{upi}</code>")
-        if not any([usdt, paypal, upi]):
-            msg.append("• No payment methods added")
+
+        # Add referral overview if user has referrals
+        if referred_users or referrer_info:
+            msg.extend([
+                "🤝 <b>Referral Overview</b>",
+                f"• Users Referred: <b>{len(referred_users)}</b>",
+                f"• Referral Views: <b>{total_referral_views:,}</b>",
+                f"• Commission Rate: <b>{commission_rate:.2f}%</b>",
+                f"• Commission Earned: <b>${commission_amount:.2f}</b>",
+                ""
+            ])
+            
+            if referrer_info:
+                referrer_id, referrer_username = referrer_info
+                try:
+                    referrer_chat = await context.bot.get_chat(referrer_id)
+                    referrer_name = referrer_chat.username or str(referrer_id)
+                except:
+                    referrer_name = str(referrer_id)
+                msg.append(f"• Referred by: <b>@{referrer_name}</b>")
+                msg.append("")
+
+        # Add linked Instagram accounts
+        if handles:
+            msg.append("📸 <b>Linked Instagram Accounts</b>")
+            msg.extend([f"• @{handle}" for handle in handles])
+            msg.append("")
+
+        # Add payment methods
+        payment_methods = []
+        if usdt: payment_methods.append(f"USDT: <code>{usdt}</code>")
+        if paypal: payment_methods.append(f"PayPal: <code>{paypal}</code>")
+        if upi: payment_methods.append(f"UPI: <code>{upi}</code>")
+        
+        if payment_methods:
+            msg.append("💳 <b>Payment Methods</b>")
+            msg.extend([f"• {method}" for method in payment_methods])
+            msg.append("")
 
         # Pagination of reel links
         links_page, total_pages = paginate_list(links, page, page_size)
-        msg.append(f"\n🎥 <b>Your Reels (Page {page}/{total_pages})</b>")
+        msg.append(f"🎥 <b>Your Reels (Page {page}/{total_pages})</b>")
         if links_page:
-            msg += [f"• https://www.instagram.com/reel/{sc}/" for sc in links_page]
+            msg.extend([f"• https://www.instagram.com/reel/{sc}/" for sc in links_page])
         else:
             msg.append("• No reels submitted yet")
 
@@ -1610,6 +1901,13 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
                     text("UPDATE account_requests SET status = 'approved' WHERE id = :id"),
                     {"id": request_id}
                 )
+                
+                # IMPORTANT: Set the user as approved so they can submit reels
+                await s.execute(
+                    text("UPDATE users SET approved = TRUE WHERE user_id = :u"),
+                    {"u": user_id}
+                )
+                
                 await s.commit()
                 try:
                     await context.bot.send_message(
@@ -1651,58 +1949,190 @@ async def handle_review_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 @debug_handler
 async def forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Force update all user view counts based on all their reels"""
-    if not await is_admin(update.effective_user.id):
-        return await update.message.reply_text("🚫 Unauthorized")
-
-    if force_update_lock.locked():
-        return await update.message.reply_text("⏳ Another update is already in progress.")
-
-    await force_update_lock.acquire()
+    """Force update all user view counts using batch task processing"""
+    user_id = update.effective_user.id
+    
+    # Check if user is admin
+    if user_id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ You don't have permission to use this command.")
+        return
+    
     try:
-        await update.message.reply_text("🔄 Starting full force update...")
-
+        # Get all users with reels using async session
         async with AsyncSessionLocal() as s:
-            users = (await s.execute(text("SELECT DISTINCT user_id FROM reels"))).fetchall()
-            total_updated = 0
-
-            for idx, (user_id,) in enumerate(users, 1):
-                total_views = 0
-                reels = (await s.execute(
-                    text("SELECT shortcode FROM reels WHERE user_id = :u"),
-                    {"u": user_id}
-                )).fetchall()
-
-                for (shortcode,) in reels:
-                    try:
-                        reel_data = await get_reel_data(shortcode)
-                        total_views += reel_data['view_count']
-                    except Exception as e:
-                        logger.warning(f"Could not update reel {shortcode}: {e}")
-
-                await s.execute(
-                    text("UPDATE users SET total_views = :v WHERE user_id = :u"),
-                    {"v": total_views, "u": user_id}
-                )
-                logger.info(f"User {user_id} updated to {total_views} views")
-                total_updated += 1
-
-                if idx % 10 == 0:
-                    await context.bot.send_message(
-                        update.effective_chat.id,
-                        f"🔄 Progress: {idx}/{len(users)} users updated..."
-                    )
-
-            await s.commit()
-            await update.message.reply_text(
-                f"✅ Force update completed!\nUsers updated: {total_updated}"
+            users_result = await s.execute(
+                text("""
+                    SELECT DISTINCT u.user_id 
+                    FROM users u 
+                    JOIN reels r ON u.user_id = r.user_id
+                """)
             )
-
+            user_ids = [row[0] for row in users_result.fetchall()]
+            
+            if not user_ids:
+                await update.message.reply_text("ℹ️ No users with reels found.")
+                return
+            
+            # Get all reel URLs for batch processing
+            reels_result = await s.execute(
+                text("SELECT id, user_id, shortcode, url FROM reels")
+            )
+            all_reels = reels_result.fetchall()
+        
+        # Collect all reel URLs for batch processing
+        all_reel_urls = []
+        reel_mapping = {}  # URL -> reel info for updating database
+        
+        for reel_id, reel_user_id, shortcode, url in all_reels:
+            reel_url = url or f"https://www.instagram.com/reel/{shortcode}/"
+            all_reel_urls.append(reel_url)
+            reel_mapping[reel_url] = {
+                "reel_id": reel_id,
+                "user_id": reel_user_id,
+                "shortcode": shortcode
+            }
+        
+        total_reels = len(all_reel_urls)
+        status_msg = await update.message.reply_text(f"🔄 Starting batch update for {total_reels} reels from {len(user_ids)} users...")
+        
+        # Create batch scraping task
+        apify_client = get_apify_client()
+        task_id = await apify_client.create_scraping_task(all_reel_urls, "bulk_update")
+        
+        await status_msg.edit_text(f"📋 Batch task created: {task_id}\n🔄 Processing {total_reels} reels... This may take 10-15 minutes.")
+        
+        # Monitor task progress
+        start_time = datetime.now()
+        timeout = 1800  # 30 minutes timeout for bulk updates
+        last_update = 0
+        
+        while True:
+            elapsed = (datetime.now() - start_time).seconds
+            
+            # Check timeout first
+            if elapsed >= timeout:
+                logger.error(f"Task {task_id} timed out after 30 minutes")
+                raise Exception("Batch task timed out after 30 minutes")
+            
+            result = await apify_client.get_task_results(task_id, wait=False)
+            logger.info(f"Task {task_id} status: {result['status']}")
+            
+            if result["status"] == "completed":
+                logger.info(f"Task {task_id} completed successfully")
+                break
+            elif result["status"] == "failed":
+                error_msg = result.get('task_info', {}).get('error', 'Unknown error')
+                logger.error(f"Task {task_id} failed: {error_msg}")
+                raise Exception(f"Batch task failed: {error_msg}")
+            
+            # Update progress every 60 seconds
+            if elapsed - last_update >= 60:
+                last_update = elapsed
+                logger.info(f"Task {task_id} still running after {elapsed} seconds")
+                await status_msg.edit_text(f"📋 Task: {task_id}\n⏳ Processing {total_reels} reels... ({elapsed//60}m {elapsed%60}s elapsed)")
+            
+            # Wait 10 seconds before next check
+            await asyncio.sleep(10)
+        
+        # Process results and update database using async session
+        updated_count = 0
+        failed_count = 0
+        user_totals = {}  # user_id -> {"views": total, "reels": count}
+        
+        async with AsyncSessionLocal() as s:
+            try:
+                for item in result["results"]:
+                    if item.get("success", False):
+                        url = item["url"]
+                        if url in reel_mapping:
+                            try:
+                                reel_info = reel_mapping[url]
+                                reel_id = reel_info["reel_id"]
+                                
+                                # Get current reel data
+                                reel_result = await s.execute(
+                                    text("SELECT views FROM reels WHERE id = :id"),
+                                    {"id": reel_id}
+                                )
+                                current_reel = reel_result.fetchone()
+                                
+                                if current_reel:
+                                    old_views = current_reel[0]
+                                    new_views = item.get("views", 0)
+                                    
+                                    # Update reel data
+                                    await s.execute(
+                                        text("""
+                                            UPDATE reels 
+                                            SET views = :views, likes = :likes, comments = :comments, last_updated = :last_updated
+                                            WHERE id = :id
+                                        """),
+                                        {
+                                            "views": new_views,
+                                            "likes": item.get("likes", 0),
+                                            "comments": item.get("comments", 0),
+                                            "last_updated": datetime.now(),
+                                            "id": reel_id
+                                        }
+                                    )
+                                    
+                                    # Track user totals
+                                    user_id_reel = reel_info["user_id"]
+                                    if user_id_reel not in user_totals:
+                                        user_totals[user_id_reel] = {"views": 0, "reels": 0}
+                                    
+                                    user_totals[user_id_reel]["views"] += new_views
+                                    user_totals[user_id_reel]["reels"] += 1
+                                    
+                                    updated_count += 1
+                                    
+                                    logger.info(f"Updated reel {reel_info['shortcode']}: {old_views} -> {new_views} views")
+                                
+                            except Exception as e:
+                                logger.error(f"Error updating reel {url}: {str(e)}")
+                                failed_count += 1
+                    else:
+                        failed_count += 1
+                
+                # Update user totals
+                users_updated = 0
+                for user_id_update, totals in user_totals.items():
+                    try:
+                        await s.execute(
+                            text("""
+                                UPDATE users 
+                                SET total_views = :total_views, total_reels = :total_reels
+                                WHERE user_id = :user_id
+                            """),
+                            {
+                                "total_views": totals["views"],
+                                "total_reels": totals["reels"],
+                                "user_id": user_id_update
+                            }
+                        )
+                        users_updated += 1
+                    except Exception as e:
+                        logger.error(f"Error updating user {user_id_update}: {str(e)}")
+                
+                await s.commit()
+                
+            except Exception as e:
+                await s.rollback()
+                raise e
+        
+        # Send completion message
+        completion_time = datetime.now() - start_time
+        result_text = f"✅ Batch update completed!\n\n"
+        result_text += f"📊 Updated: {updated_count} reels\n"
+        result_text += f"❌ Failed: {failed_count} reels\n"
+        result_text += f"👥 Users updated: {users_updated}\n"
+        result_text += f"⏱️ Time taken: {completion_time.seconds//60}m {completion_time.seconds%60}s"
+        
+        await status_msg.edit_text(result_text)
+        
     except Exception as e:
-        logger.error(f"Force update error: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
-    finally:
-        force_update_lock.release()
+        logger.error(f"Error in forceupdate: {str(e)}")
+        await update.message.reply_text(f"❌ An error occurred: {str(e)}")
 
 @debug_handler
 async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3024,17 +3454,16 @@ async def generate_profile_image(user_id, username, total_views, total_reels, pa
     return buffer
 
 # MAIN command
-@debug_handler
 async def endcycle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("❌ Unauthorized.")
+
+    await update.message.reply_text("🚀 Sending invoices and profiles...")
+
+    sent = 0
+    skipped = 0
+
     async with AsyncSessionLocal() as s:
-        if not await is_admin(update.effective_user.id):
-            return await update.message.reply_text("❌ Unauthorized.")
-
-        await update.message.reply_text("🚀 Sending invoices and profiles...")
-
-        sent = 0
-        skipped = 0
-
         result = await s.execute(text("SELECT user_id, username, total_views FROM users"))
         users = result.fetchall()
 
@@ -3055,14 +3484,14 @@ async def endcycle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await context.bot.send_message(
                         user_id,
-                        "⚠️ Sorry, you didn’t meet the required views criteria (4M) this cycle. Better try next time!"
+                        "⚠️ Sorry, you didn't meet the required views criteria (4M) this cycle. Better Try Next Time!"
                     )
                     skipped += 1
             except Exception as e:
-                logger.error(f"❌ Failed to send to {user_id}: {e}")
+                print(f"Failed to send to {user_id}: {e}")
                 continue
 
-        await update.message.reply_text(f"✅ End cycle complete:\n📤 Sent: {sent}\n⏭️ Skipped: {skipped}")
+    await update.message.reply_text(f"✅ End cycle complete:\n📤 Sent: {sent}\n⏭️ Skipped: {skipped}")
     
 @debug_handler
 async def clearslot(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3157,6 +3586,10 @@ async def run_bot():
         ("referralstats", referralstats),
         ("setcommission", setcommission), 
         ("getcommission", getcommission),
+        ("removeusdt", remove_usdt),
+        ("removepaypal", remove_paypal),
+        ("removeupi", remove_upi),
+        ("taskstatus", taskstatus),
     ]
     for cmd, h in handlers:
         app.add_handler(CommandHandler(cmd, h))
@@ -3176,6 +3609,38 @@ async def run_bot():
     finally:
         await app.stop()
         await app.shutdown()
+
+@debug_handler
+async def taskstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check Apify task system status (Admin only)"""
+    user_id = update.effective_user.id
+    
+    # Check if user is admin
+    if user_id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ You don't have permission to use this command.")
+        return
+    
+    try:
+        apify_client = get_apify_client()
+        status = await apify_client.get_task_status()
+        
+        status_text = f"📋 **Apify Task System Status**\n\n"
+        status_text += f"🔄 Active tasks: {status['active_tasks']}\n"
+        status_text += f"⏳ Queued tasks: {status['queued_tasks']}\n"
+        
+        if status['tasks']:
+            status_text += f"\n**Active Task IDs:**\n"
+            for task_id in status['tasks'][:5]:  # Show first 5
+                status_text += f"• `{task_id}`\n"
+            
+            if len(status['tasks']) > 5:
+                status_text += f"... and {len(status['tasks']) - 5} more\n"
+        
+        await update.message.reply_text(status_text, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Error in taskstatus: {str(e)}")
+        await update.message.reply_text(f"❌ Error getting task status: {str(e)}")
 
 if __name__ == "__main__":
     asyncio.run(run_bot())
