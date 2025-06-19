@@ -9,3 +9,4 @@ asyncpg
 pillow
 logger
 aiohttp
+psycopg2
