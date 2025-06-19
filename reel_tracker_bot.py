@@ -2,8 +2,10 @@ import os
 import re
 import asyncio
 import logging
+import random
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
+from io import BytesIO
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -1028,7 +1030,7 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Check if results exist and are in the expected format
             if not result.get("results"):
-                raise Exception("No results returned from Apify task")
+                raise Exception("The reel(s) you submitted could not be found or do not exist. Please check the URLs and try again.")
             
             async with AsyncSessionLocal() as s:
                 try:
@@ -1036,26 +1038,35 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         try:
                             # Check if item has the expected structure
                             if not isinstance(item, dict):
-                                failed_reels.append({"url": "unknown", "error": "Invalid result format"})
+                                failed_reels.append({"url": "unknown", "error": "Invalid reel format"})
                                 continue
                             
                             # Check if the item was successful
                             if not item.get("success", False):
-                                error_msg = item.get("error", "Scraping failed")
+                                error_msg = item.get("error", "Reel could not be processed")
                                 url = item.get("url", "unknown")
-                                failed_reels.append({"url": url, "error": error_msg})
+                                # Make error messages more user-friendly
+                                if "not found" in error_msg.lower() or "does not exist" in error_msg.lower():
+                                    user_error = "This reel does not exist or has been removed"
+                                elif "private" in error_msg.lower():
+                                    user_error = "This reel is private and cannot be accessed"
+                                elif "blocked" in error_msg.lower() or "restricted" in error_msg.lower():
+                                    user_error = "This reel is restricted and cannot be accessed"
+                                else:
+                                    user_error = "This reel could not be processed"
+                                failed_reels.append({"url": url, "error": user_error})
                                 continue
                             
                             # Extract URL and validate
                             url = item.get("url")
                             if not url:
-                                failed_reels.append({"url": "unknown", "error": "No URL in result"})
+                                failed_reels.append({"url": "unknown", "error": "Invalid reel URL"})
                                 continue
                             
                             # Extract shortcode from URL
                             shortcode = extract_shortcode_from_url(url)
                             if not shortcode:
-                                failed_reels.append({"url": url, "error": "Could not extract shortcode"})
+                                failed_reels.append({"url": url, "error": "Could not extract reel ID from URL"})
                                 continue
                             
                             # Double-check if reel already exists (race condition protection)
@@ -1064,7 +1075,7 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 {"sc": shortcode}
                             )
                             if existing_check.fetchone():
-                                failed_reels.append({"url": url, "error": "Reel already exists"})
+                                failed_reels.append({"url": url, "error": "This reel has already been submitted"})
                                 continue
                             
                             # Insert new reel entry
@@ -1097,7 +1108,7 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except Exception as e:
                             logger.error(f"Error processing individual reel: {str(e)}")
                             url = item.get("url", "unknown") if isinstance(item, dict) else "unknown"
-                            failed_reels.append({"url": url, "error": str(e)})
+                            failed_reels.append({"url": url, "error": "Failed to process this reel"})
                     
                     # Update user statistics
                     if successful_reels:
@@ -1167,18 +1178,28 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await processing_msg.edit_text(result_text)
             
             if failed_reels:
-                error_text = f"❌ {len(failed_reels)} reel(s) failed:\n\n"
+                error_text = f"❌ {len(failed_reels)} reel(s) could not be processed:\n\n"
                 for fail in failed_reels[:3]:  # Show first 3 failures
-                    error_text += f"• {fail['url'][:50]}... - {fail['error']}\n"
+                    # Truncate URL for display
+                    display_url = fail['url'][:50] + "..." if len(fail['url']) > 50 else fail['url']
+                    error_text += f"• {display_url}\n  └ {fail['error']}\n\n"
                 
                 if len(failed_reels) > 3:
-                    error_text += f"\n... and {len(failed_reels) - 3} more failures"
+                    error_text += f"... and {len(failed_reels) - 3} more issues"
                 
                 await update.message.reply_text(error_text)
             
         except Exception as e:
             logger.error(f"Error in submit task processing: {str(e)}")
-            await processing_msg.edit_text(f"❌ Error processing reels: {str(e)}")
+            # Provide user-friendly error messages
+            if "could not be found" in str(e) or "does not exist" in str(e):
+                await processing_msg.edit_text("❌ The reel(s) you submitted could not be found or do not exist. Please check the URLs and try again.")
+            elif "timed out" in str(e):
+                await processing_msg.edit_text("❌ The request timed out. Please try again in a few minutes.")
+            elif "task failed" in str(e):
+                await processing_msg.edit_text("❌ There was an issue processing your reels. Please try again later.")
+            else:
+                await processing_msg.edit_text(f"❌ An error occurred while processing your reels. Please try again later.")
             
     except Exception as e:
         logger.error(f"Error in submit command: {str(e)}")
@@ -3233,6 +3254,7 @@ def calculate_tax(gross):
     return round(gross * 0.12, 2)
 
 # Telegram bot command: /invoice <user_id>
+@debug_handler
 async def invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Usage: /invoice <user_id>")
@@ -3283,6 +3305,7 @@ async def invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def format_millions(n):
     return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
 
+@debug_handler
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
