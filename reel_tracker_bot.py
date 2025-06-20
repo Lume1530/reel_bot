@@ -3541,6 +3541,92 @@ async def slotdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Invalid slot number")
 
+#profilecard
+def format_millions(n):
+    return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
+
+@debug_handler
+async def profilecard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    async with AsyncSessionLocal() as s:
+        result = await s.execute(text("SELECT username, total_views FROM users WHERE user_id = :u"), {"u": user_id})
+        row = result.first()
+        if not row:
+            return await update.message.reply_text("❌ User not found.")
+
+        username, total_views = row
+        total_reels = (await s.execute(text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id})).scalar()
+        payout = round((total_views / 1000) * 0.025, 2)
+
+    bg = Image.open("template_profile_card.png").convert("RGB")
+    draw = ImageDraw.Draw(bg)
+
+    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 44)
+    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
+
+    try:
+        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
+        if photos.total_count > 0:
+            file = await context.bot.get_file(photos.photos[0][0].file_id)
+            img_data = requests.get(file.file_path).content
+            pfp = Image.open(BytesIO(img_data)).resize((250, 250)).convert("RGB")
+        else:
+            pfp = Image.new("RGB", (250, 250), "#ccc")
+    except:
+        pfp = Image.new("RGB", (250, 250), "#ccc")
+
+    mask = Image.new("L", (250, 250), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, 250, 250), fill=255)
+    pfp_x, pfp_y = 388, 280
+    bg.paste(pfp, (pfp_x, pfp_y), mask)
+
+    uname_y = 580
+    uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
+    draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
+
+    badge_texts = [
+        "Top Creator", "Content Emperor", "Rising Star", "Content King",
+        "View Magnet", "Reel Master", "Reel Master", "Aura Farmer",
+        "Engage More", "Watch Me Grow", "Trendsetter", "Viral Genius",
+        "Storyteller", "Next Big Thing", "Content Wizard", "Social Butterfly",
+        "Power Poster", "Daily Hustler", "Creative Beast", "Fan Favorite",
+        "Mastermind", "Audience Magnet", "Game Changer", "Hit Maker",
+        "Visionary", "Bold & Brave",
+    ]
+
+    text1, text2 = random.sample(badge_texts, 2)
+    separator = " | "
+    full_text = text1 + separator + text2
+    total_width = draw.textlength(full_text, font=small_font)
+    start_x = (1024 - total_width) // 2
+    badge_y = uname_y + 60
+
+    draw.text((start_x, badge_y), text1, font=small_font, fill="#222")
+    sep_x = start_x + draw.textlength(text1, font=small_font)
+    draw.text((sep_x, badge_y), separator, font=small_font, fill="#555")
+    text2_x = sep_x + draw.textlength(separator, font=small_font)
+    draw.text((text2_x, badge_y), text2, font=small_font, fill="#222")
+
+    stats = [
+        (format_millions(total_views), "VIEWS"),
+        (str(total_reels), "REELS"),
+        (f"${payout:,.2f}", "PAYOUT")
+    ]
+    stat_xs = [160, 430, 700]
+    stat_y = 760
+
+    for i, (val, label) in enumerate(stats):
+        draw.text((stat_xs[i], stat_y), val, font=bold_font, fill="#111")
+        draw.text((stat_xs[i], stat_y + 40), label, font=small_font, fill="#666")
+
+    buffer = BytesIO()
+    bg.save(buffer, format="PNG")
+    buffer.seek(0)
+    await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")
+
+profilecard_cmd = CommandHandler("profilecard", profilecard)
+
 # End cycle 
 async def generate_invoice_image(user_id, username, total_views):
     gross_payout = round((total_views / 1000) * 0.025, 2)
@@ -3735,6 +3821,7 @@ async def run_bot():
         ("slotdata", slotdata), 
         ("clearslot", clearslot), 
         ("lbpng", lbpng),
+        ("profilecard", profilecard),
         ("profile", profile_conv),
         ("endcycle", endcycle),
         ("setmindate", setmindate), 
