@@ -3739,7 +3739,6 @@ async def run_bot():
         ("setmindate", setmindate), 
         ("getmindate", getmindate),
         ("referral", referral), 
-        ("profile", profile_conv),
         ("removeviews", removeviews),
         ("referralstats", referralstats),
         ("setcommission", setcommission), 
@@ -3753,6 +3752,8 @@ async def run_bot():
     for cmd, h in handlers:
         app.add_handler(CommandHandler(cmd, h))
     
+    application.add_handler(profile_conv)
+
     # Add callback query handler for review buttons
     app.add_handler(CallbackQueryHandler(handle_userstats_page, pattern=r"^userstats_\d+$"))
     app.add_handler(CallbackQueryHandler(handle_creatorstats_page, pattern=r"^creatorstats_\d+$"))
