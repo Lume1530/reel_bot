@@ -8,7 +8,7 @@ from typing import List, Dict, Optional
 from io import BytesIO
 import requests
 from PIL import Image, ImageDraw, ImageFont
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
 from sqlalchemy import create_engine, Column, Integer, String, BigInteger, DateTime, Boolean, text
@@ -3301,106 +3301,185 @@ async def invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Send back to user
     await update.message.reply_photo(photo=buffer, caption=f"🧾 Invoice for @{username}")
     
-#Profile
-def format_millions(n):
-    return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else f"{int(n/1_000)}K"
+#PROFILE
+ADD_ACCOUNT_USERNAME, ADD_PAYMENT_METHOD, ADD_PAYMENT_VALUE, SUBMIT_REELS = range(4)
 
 @debug_handler
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = "👤 <b>Your Profile</b>\n\nManage your account using the buttons below:"
+
+    buttons = [
+        [InlineKeyboardButton("➕ Add Account", callback_data="profile_addaccount")],
+        [InlineKeyboardButton("💳 Add Payment", callback_data="profile_addpayment")],
+        [InlineKeyboardButton("🎥 My Reels", callback_data="profile_myreels_page_1")],
+        [InlineKeyboardButton("📥 Submit Reels", callback_data="profile_submit")]
+    ]
+    markup = InlineKeyboardMarkup(buttons)
+
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+@debug_handler
+async def profile_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "profile_addaccount":
+        await query.edit_message_text("✍️ Please send me the Instagram username you want to link (without @):")
+        return ADD_ACCOUNT_USERNAME
+
+    elif query.data == "profile_addpayment":
+        buttons = [[KeyboardButton("UPI")], [KeyboardButton("Crypto (USDT ERC20)")], [KeyboardButton("PayPal")]]
+        markup = ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True)
+        await query.edit_message_text("💳 Choose a payment method:")
+        await query.message.reply_text("Choose a payment method:", reply_markup=markup)
+        return ADD_PAYMENT_METHOD
+
+    elif query.data.startswith("profile_myreels_page_"):
+        page = int(query.data.split("_")[-1])
+        await send_myreels_page(update, context, page)
+
+    elif query.data == "profile_submit":
+        await query.edit_message_text("📥 Please send up to 10 Instagram reel links separated by spaces or new lines:")
+        return SUBMIT_REELS
+
+
+@debug_handler
+async def handle_add_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    handle = update.message.text.strip().lstrip("@")
     user_id = update.effective_user.id
 
     async with AsyncSessionLocal() as s:
-        result = await s.execute(text("SELECT username, total_views FROM users WHERE user_id = :u"), {"u": user_id})
-        row = result.first()
-        if not row:
-            return await update.message.reply_text("❌ User not found.")
-        
-        username, total_views = row
-        total_reels = (await s.execute(text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id})).scalar()
-        payout = round((total_views / 1000) * 0.025, 2)
+        # Check pending request count
+        pending_count = (await s.execute(
+            text("SELECT COUNT(*) FROM account_requests WHERE user_id = :u AND status = 'pending'"),
+            {"u": user_id}
+        )).scalar() or 0
+
+        if pending_count >= 5:
+            await update.message.reply_text("❗ You already have 5 pending requests. Please wait for approval.", reply_markup=ReplyKeyboardRemove())
+            return ConversationHandler.END
+
+        await s.execute(
+            text("INSERT INTO account_requests (user_id, insta_handle) VALUES (:u, :h)"),
+            {"u": user_id, "h": handle}
+        )
+        await s.commit()
+
+        # Notify admins
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    admin_id,
+                    f"🔔 New Account Request\nUser: <code>{user_id}</code>\nHandle: @{handle}\nApprove using /review {user_id}",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                logger.warning(f"Failed to notify admin {admin_id}: {e}")
+
+        await update.message.reply_text(f"✅ Your request to link @{handle} has been submitted for approval.", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
 
 
-    # Load 1024x1024 background template
-    bg = Image.open("template_profile_card.png").convert("RGB")
-    draw = ImageDraw.Draw(bg)
+@debug_handler
+async def handle_add_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    choice = update.message.text.strip().lower()
 
-    # Fonts
-    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 44)
-    small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
+    if "upi" in choice:
+        context.user_data['payment_type'] = 'upi'
+        await update.message.reply_text("🔢 Please enter your UPI ID:", reply_markup=ReplyKeyboardRemove())
+    elif "crypto" in choice:
+        context.user_data['payment_type'] = 'crypto'
+        await update.message.reply_text("💱 Please enter your USDT ERC20 Address:", reply_markup=ReplyKeyboardRemove())
+    elif "paypal" in choice:
+        context.user_data['payment_type'] = 'paypal'
+        await update.message.reply_text("📧 Please enter your PayPal email:", reply_markup=ReplyKeyboardRemove())
+    else:
+        await update.message.reply_text("❌ Invalid option. Please restart the process with /profile.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
 
-    # Load and process profile photo
-    try:
-        photos = await context.bot.get_user_profile_photos(user_id, limit=1)
-        if photos.total_count > 0:
-            file = await context.bot.get_file(photos.photos[0][0].file_id)
-            img_data = requests.get(file.file_path).content
-            pfp = Image.open(BytesIO(img_data)).resize((250, 250)).convert("RGB")
+    return ADD_PAYMENT_VALUE
+
+
+@debug_handler
+async def handle_add_payment_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    value = update.message.text.strip()
+    payment_type = context.user_data.get("payment_type")
+    user_id = update.effective_user.id
+
+    async with AsyncSessionLocal() as s:
+        exists = (await s.execute(text("SELECT id FROM payment_details WHERE user_id = :u"), {"u": user_id})).fetchone()
+
+        field_map = {
+            "upi": "upi_address",
+            "crypto": "usdt_address",
+            "paypal": "paypal_email"
+        }
+        field = field_map[payment_type]
+
+        if exists:
+            await s.execute(text(f"UPDATE payment_details SET {field} = :val WHERE user_id = :u"), {"val": value, "u": user_id})
         else:
-            pfp = Image.new("RGB", (250, 250), "#ccc")
-    except:
-        pfp = Image.new("RGB", (250, 250), "#ccc")
+            await s.execute(text(f"INSERT INTO payment_details (user_id, {field}) VALUES (:u, :val)"), {"u": user_id, "val": value})
 
-    # Apply circular mask and paste at exact center of grey circle
-    mask = Image.new("L", (250, 250), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 250, 250), fill=255)
-    pfp_x, pfp_y = 388, 280  # Centered at (408, 512)
-    bg.paste(pfp, (pfp_x, pfp_y), mask)
+        await s.commit()
 
-    # ✅ Username - centered below PFP
-    uname_y = 580
-    uname_x = (1024 - draw.textlength(username, font=bold_font)) // 2
-    draw.text((uname_x, uname_y), username, font=bold_font, fill="#222")
-    
-    #quote badge
-    badge_texts = [
-        "Top Creator", "Content Emperor", "Rising Star", "Content King",
-        "View Magnet", "Reel Master", "Reel Master", "Aura Farmer",
-        "Engage More", "Watch Me Grow", "Trendsetter", "Viral Genius",
-        "Storyteller", "Next Big Thing", "Content Wizard", "Social Butterfly",
-        "Power Poster", "Daily Hustler", "Creative Beast", "Fan Favorite",
-        "Mastermind", "Audience Magnet", "Game Changer", "Hit Maker",
-        "Visionary", "Bold & Brave",
-    ]
-
-    # Pick 2 unique badges randomly
-    text1, text2 = random.sample(badge_texts, 2)
-    separator = " | "
-    full_text = text1 + separator + text2
-    total_width = draw.textlength(full_text, font=small_font)
-    start_x = (1024 - total_width) // 2
-    badge_y = uname_y + 60  # position a bit below username
-
-    # Draw first badge
-    draw.text((start_x, badge_y), text1, font=small_font, fill="#222")
-
-    # Draw separator
-    sep_x = start_x + draw.textlength(text1, font=small_font)
-    draw.text((sep_x, badge_y), separator, font=small_font, fill="#555")
-
-    # Draw second badge
-    text2_x = sep_x + draw.textlength(separator, font=small_font)
-    draw.text((text2_x, badge_y), text2, font=small_font, fill="#222")
+    await update.message.reply_text(f"✅ Your {payment_type.upper()} payment detail has been saved.")
+    return ConversationHandler.END
 
 
-    # ✅ Stats (keep as-is, just move down slightly)
-    stats = [
-        (format_millions(total_views), "VIEWS"),
-        (str(total_reels), "REELS"),
-        (f"${payout:,.2f}", "PAYOUT")
-    ]
-    stat_xs = [160, 430, 700]
-    stat_y = 760  # previously ~700
+@debug_handler
+async def handle_submit_reels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_links = update.message.text.strip().split()
+    if len(raw_links) > 10:
+        await update.message.reply_text("❗ You can submit up to 10 reels at a time. Please resend with up to 10 links.")
+        return SUBMIT_REELS
 
-    for i, (val, label) in enumerate(stats):
-        draw.text((stat_xs[i], stat_y), val, font=bold_font, fill="#111")
-        draw.text((stat_xs[i], stat_y + 40), label, font=small_font, fill="#666")
+    context.args = raw_links  # reuse /submit handler logic
+    await submit(update, context)
+    return ConversationHandler.END
 
-    # Send image
-    buffer = BytesIO()
-    bg.save(buffer, format="PNG")
-    buffer.seek(0)
-    await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")
 
+async def send_myreels_page(update_or_query, context, page):
+    page_size = 10
+    user_id = update_or_query.effective_user.id
+
+    async with AsyncSessionLocal() as s:
+        reels = [r[0] for r in (await s.execute(
+            text("SELECT shortcode FROM reels WHERE user_id = :u ORDER BY submitted_at DESC"),
+            {"u": user_id}
+        )).fetchall()]
+
+    paged_reels, total_pages = paginate_list(reels, page, page_size)
+    text_lines = [f"🎥 <b>My Reels (Page {page}/{total_pages})</b>"]
+
+    for shortcode in paged_reels:
+        text_lines.append(f"• https://www.instagram.com/reel/{shortcode}/")
+
+    buttons = []
+    if page > 1:
+        buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"profile_myreels_page_{page - 1}"))
+    if page < total_pages:
+        buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"profile_myreels_page_{page + 1}"))
+
+    markup = InlineKeyboardMarkup([buttons]) if buttons else None
+
+    send_fn = update_or_query.edit_message_text if hasattr(update_or_query, "edit_message_text") else update_or_query.message.reply_text
+    await send_fn("\n".join(text_lines), parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+profile_conv = ConversationHandler(
+    entry_points=[CommandHandler("profile", profile), CallbackQueryHandler(profile_callback_handler, pattern="^profile_")],
+
+    states={
+        ADD_ACCOUNT_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_account)],
+        ADD_PAYMENT_METHOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_payment_method)],
+        ADD_PAYMENT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_payment_value)],
+        SUBMIT_REELS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_submit_reels)],
+    },
+
+    fallbacks=[CommandHandler("cancel", lambda update, context: update.message.reply_text("❌ Cancelled.", reply_markup=ReplyKeyboardRemove()))]
+)
     
 @debug_handler
 async def slotdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3660,7 +3739,7 @@ async def run_bot():
         ("setmindate", setmindate), 
         ("getmindate", getmindate),
         ("referral", referral), 
-        ("profile", profile),
+        ("profile", profile_conv),
         ("removeviews", removeviews),
         ("referralstats", referralstats),
         ("setcommission", setcommission), 
