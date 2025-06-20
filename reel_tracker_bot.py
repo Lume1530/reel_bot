@@ -3555,7 +3555,15 @@ async def profilecard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not row:
             return await update.message.reply_text("❌ User not found.")
 
-        username, total_views = row
+        db_username, total_views = row
+        username = (
+            db_username or
+            update.effective_user.username or
+            update.effective_user.full_name or
+            update.effective_user.first_name or
+            "Anonymous"
+        )
+
         total_reels = (await s.execute(text("SELECT COUNT(*) FROM reels WHERE user_id = :u"), {"u": user_id})).scalar()
         payout = round((total_views / 1000) * 0.025, 2)
 
@@ -3573,7 +3581,8 @@ async def profilecard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pfp = Image.open(BytesIO(img_data)).resize((250, 250)).convert("RGB")
         else:
             pfp = Image.new("RGB", (250, 250), "#ccc")
-    except:
+    except Exception as e:
+        logger.warning(f"Profile photo fetch failed for {user_id}: {e}")
         pfp = Image.new("RGB", (250, 250), "#ccc")
 
     mask = Image.new("L", (250, 250), 0)
@@ -3587,12 +3596,11 @@ async def profilecard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     badge_texts = [
         "Top Creator", "Content Emperor", "Rising Star", "Content King",
-        "View Magnet", "Reel Master", "Reel Master", "Aura Farmer",
-        "Engage More", "Watch Me Grow", "Trendsetter", "Viral Genius",
-        "Storyteller", "Next Big Thing", "Content Wizard", "Social Butterfly",
-        "Power Poster", "Daily Hustler", "Creative Beast", "Fan Favorite",
-        "Mastermind", "Audience Magnet", "Game Changer", "Hit Maker",
-        "Visionary", "Bold & Brave",
+        "View Magnet", "Reel Master", "Aura Farmer", "Engage More",
+        "Watch Me Grow", "Trendsetter", "Viral Genius", "Storyteller",
+        "Next Big Thing", "Content Wizard", "Social Butterfly", "Power Poster",
+        "Daily Hustler", "Creative Beast", "Fan Favorite", "Mastermind",
+        "Audience Magnet", "Game Changer", "Hit Maker", "Visionary", "Bold & Brave"
     ]
 
     text1, text2 = random.sample(badge_texts, 2)
@@ -3626,6 +3634,7 @@ async def profilecard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")
 
 profilecard_cmd = CommandHandler("profilecard", profilecard)
+
 
 # End cycle 
 async def generate_invoice_image(user_id, username, total_views):
