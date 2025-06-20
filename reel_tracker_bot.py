@@ -3735,6 +3735,7 @@ async def run_bot():
         ("slotdata", slotdata), 
         ("clearslot", clearslot), 
         ("lbpng", lbpng),
+        ("profile", profile_conv),
         ("endcycle", endcycle),
         ("setmindate", setmindate), 
         ("getmindate", getmindate),
@@ -3752,7 +3753,6 @@ async def run_bot():
     for cmd, h in handlers:
         app.add_handler(CommandHandler(cmd, h))
     
-    application.add_handler(profile_conv)
 
     # Add callback query handler for review buttons
     app.add_handler(CallbackQueryHandler(handle_userstats_page, pattern=r"^userstats_\d+$"))
