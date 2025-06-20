@@ -3633,8 +3633,6 @@ async def profilecard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buffer.seek(0)
     await update.message.reply_photo(photo=buffer, caption="📇 Your Creator Profile Card")
 
-profilecard_cmd = CommandHandler("profilecard", profilecard)
-
 
 # End cycle 
 async def generate_invoice_image(user_id, username, total_views):
